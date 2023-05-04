@@ -22,7 +22,7 @@ pub enum ScanError {
 
 impl From<regex::Error> for ScanError {
     fn from(_err: regex::Error) -> ScanError {
-        return ScanError::InvalidRegexCaptureConversion;
+        ScanError::InvalidRegexCaptureConversion
     }
 }
 
@@ -59,7 +59,7 @@ impl Scanner {
 
     // Get the character under the cursor and advance. None is returned if we are at the end of the
     // file.
-    pub fn next(&mut self) -> Option<&char> {
+    pub fn next_char(&mut self) -> Option<&char> {
         match self.characters.get(self.cursor) {
             Some(character) => {
                 self.cursor += 1;
@@ -76,9 +76,9 @@ impl Scanner {
             Some(current) => {
                 if current == character {
                     self.cursor += 1;
-                    return true;
+                    true
                 } else {
-                    return false;
+                    false
                 }
             }
             None => false,
@@ -122,7 +122,7 @@ impl Scanner {
         loop {
             match self.peek() {
                 Some('\n') => {
-                    self.next();
+                    self.next_char();
                 }
                 _ => return,
             }
@@ -153,7 +153,7 @@ impl Scanner {
                 break false;
             }
             let current_char: char = self.characters[peek_cursor];
-            if &current_char != &sequence[sequence_cursor] {
+            if current_char != sequence[sequence_cursor] {
                 break false;
             }
             sequence_cursor += 1;
@@ -162,7 +162,7 @@ impl Scanner {
         if matches_str {
             self.cursor = peek_cursor;
         }
-        return matches_str;
+        matches_str
     }
 
     pub fn seek_return(&mut self, character: &char) -> Result<String, ScanError> {
@@ -197,7 +197,7 @@ impl Scanner {
         // we only want to match from the current position forward, therefore add regex start of
         // string symbol ^
         let mut regex_str: String = user_regex_str.to_owned();
-        if !regex_str.starts_with("^") {
+        if !regex_str.starts_with('^') {
             regex_str = format!("^{}", user_regex_str);
         }
         let regex = regex::bytes::Regex::new(&regex_str)?;
@@ -231,6 +231,7 @@ impl Scanner {
         };
     }
 
+
     /// Get the current line (excluding the new line character) and advance to the next.
     pub fn get_line_and_advance(&mut self) -> Option<String> {
         let mut peek_cursor = self.cursor;
@@ -255,7 +256,26 @@ impl Scanner {
 
         self.cursor = peek_cursor;
 
-        return Some(line);
+        Some(line)
+    }
+
+    pub fn peek_line(&mut self) -> Option<String> {
+        if self.is_done() {
+            return None;
+        }
+
+        let mut peek_cursor = self.cursor;
+        let len = self.characters.len();
+
+        while peek_cursor <= len && self.characters[peek_cursor] != '\n' {
+            peek_cursor += 1;
+        }
+
+        Some(
+            self.characters[self.cursor..peek_cursor]
+                .iter()
+                .collect::<String>(),
+        )
     }
 
     pub fn skip_to_next_line(&mut self) {
@@ -273,14 +293,12 @@ impl Scanner {
 
     pub fn get_tokens(&self) -> Vec<String> {
         // @TODO check whitespace
-        let tokens: Vec<String> = self
-            .characters
+        self.characters
             .iter()
             .collect::<String>()
             .split_whitespace()
             .map(|s| s.to_string())
-            .collect();
-        return tokens;
+            .collect()
     }
 
     pub fn scan<T>(
@@ -343,14 +361,16 @@ impl Scanner {
 // only for debugging
 #[cfg(debug_assertions)]
 impl Scanner {
-    pub fn debug_print(&self) -> String {
-        let before: String = self.characters[..self.cursor].iter().collect();
-        let current: String = if self.is_done() {
-            String::new()
-        } else {
-            self.characters[self.cursor].to_string()
-        };
-        let after: String = if self.is_done() {
+    pub fn debug_string(&self) -> String {
+        println!("DEBUG PRINT");
+        let before: String = dbg!(self.characters[..self.cursor].iter().collect());
+
+        let current: String = self
+            .characters
+            .get(self.cursor)
+            .map_or("".to_string(), |c| c.to_string());
+
+        let after: String = if self.cursor >= self.characters.len() - 1 {
             String::new()
         } else {
             self.characters[self.cursor + 1..].iter().collect()
@@ -448,7 +468,7 @@ mod tests {
         scanner.skip_empty_lines();
         assert_eq!(scanner.cursor, 0);
 
-        scanner.next();
+        scanner.next_char();
         assert_eq!(scanner.cursor, 1);
 
         scanner.skip_empty_lines();
@@ -464,7 +484,7 @@ mod tests {
         scanner.skip_ws();
         assert_eq!(scanner.cursor, 0);
 
-        scanner.next();
+        scanner.next_char();
         scanner.skip_ws();
         let last_char = scanner.peek().unwrap();
         assert_eq!(*last_char, '1');
@@ -517,15 +537,15 @@ mod tests {
         assert_eq!(scanner.peek(), Some(&'0'));
         assert_eq!(scanner.cursor, 0);
 
-        scanner.next();
+        scanner.next_char();
         assert_eq!(scanner.peek(), Some(&' '));
         assert_eq!(scanner.cursor, 1);
 
-        scanner.next();
+        scanner.next_char();
         assert_eq!(scanner.peek(), Some(&'\n'));
         assert_eq!(scanner.cursor, 2);
 
-        scanner.next();
+        scanner.next_char();
 
         // we are at the end
         assert_eq!(scanner.peek(), None);
