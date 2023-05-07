@@ -43,10 +43,15 @@ pub struct DispositionField {
 #[derive(PartialEq, Debug, Clone)]
 pub struct Multipart {
     pub name: String,
-    pub from_filepath: Option<String>,
-    pub data: Option<String>,
+    pub data: DataSource<String>,
     pub fields: Vec<DispositionField>,
     pub headers: Vec<Header>,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub enum DataSource<T> {
+    Raw(T),
+    FromFilepath(T),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +62,9 @@ pub enum RequestBody {
         parts: Vec<Multipart>,
     },
     //@TODO
-    Text(String),
+    Text {
+        data: DataSource<String>,
+    },
 }
 
 impl RequestTarget {

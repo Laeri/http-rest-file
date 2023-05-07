@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use crate::{
     model,
-    model::ParseErrorType,
+    model::{DataSource, ParseErrorType},
     parser::model::HttpMethod,
     scanner::{LineIterator, WS_CHARS},
 };
@@ -334,10 +334,9 @@ You have additional elements: '{}'",
             // @TODO is name expected?
             Ok(Multipart {
                 name: name.value,
-                from_filepath: Some(file_path.to_string()),
                 fields,
                 headers: part_headers.to_vec(),
-                data: None, // @TODO: when to read in data from file?
+                data: DataSource::FromFilepath(file_path.to_string()), // @TODO: when to read in data from file?
             })
         } else {
             let mut text = String::new();
@@ -354,10 +353,9 @@ You have additional elements: '{}'",
                 if peek_line == boundary_line || peek_line == multipart_end_line {
                     return Ok(Multipart {
                         name: name.value,
-                        from_filepath: None,
                         fields,
                         headers: part_headers.to_owned(),
-                        data: Some(text),
+                        data: DataSource::Raw(text),
                     });
                 }
                 let next = scanner.get_line_and_advance().unwrap();
@@ -556,7 +554,17 @@ You have additional elements: '{}'",
                 scanner.skip_to_next_line();
             }
             let end_pos = scanner.get_pos();
-            body = model::RequestBody::Text(scanner.get_from_to(start_pos, end_pos));
+            let body_str = scanner.get_from_to(start_pos, end_pos);
+            if body_str.trim().starts_with("<") {
+                let path = body_str.split("<").nth(1).unwrap().trim();
+                body = model::RequestBody::Text {
+                    data: DataSource::FromFilepath(path.to_string()),
+                };
+            } else {
+                body = model::RequestBody::Text {
+                    data: DataSource::Raw(body_str),
+                };
+            }
         }
         (body, parse_errs)
     }
@@ -1210,8 +1218,7 @@ Content-Disposition: form-data; name="part1_name"
                 boundary: "--test_boundary".to_string(),
                 parts: vec![Multipart {
                     name: "part1_name".to_string(),
-                    from_filepath: Some("path/to/file".to_string()),
-                    data: None,
+                    data: DataSource::FromFilepath("path/to/file".to_string()),
                     fields: vec![],
                     headers: vec![]
                 }]
@@ -1262,15 +1269,13 @@ more content
                         name: "text".to_string(),
                         fields: vec![],
                         headers: vec![],
-                        data: Some("some text\n".to_string()),
-                        from_filepath: None
+                        data: DataSource::Raw("some text\n".to_string()),
                     },
                     Multipart {
                         name: "text".to_string(),
                         fields: vec![],
                         headers: vec![],
-                        data: Some("more content\n\n".to_string()),
-                        from_filepath: None
+                        data: DataSource::Raw("more content\n\n".to_string()),
                     }
                 ]
             }
@@ -1316,10 +1321,9 @@ Content-Type: application/json
                 boundary: "WebAppBoundary".to_string(),
                 parts: vec![
                     Multipart {
-                        data: Some("Name".to_string()),
+                        data: DataSource::Raw("Name".to_string()),
                         name: "element-name".to_string(),
                         fields: vec![],
-                        from_filepath: None,
                         headers: vec![Header {
                             key: "Content-Type".to_string(),
                             value: "text/plain".to_string()
@@ -1327,9 +1331,7 @@ Content-Type: application/json
                     },
                     Multipart {
                         name: "data".to_string(), // @TODO
-                        data: None,
-                        // @TODO: check within fields, filename: Some("data.json".to_string()),
-                        from_filepath: Some("./request-form-data.json".to_string()),
+                        data: DataSource::FromFilepath("./request-form-data.json".to_string()),
                         fields: vec![DispositionField {
                             key: "filename".to_string(),
                             value: "data.json".to_string()
@@ -1385,7 +1387,6 @@ H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRA
                 boundary: r#"/////////////////////////////"#.to_string(),
                 parts: vec![model::Multipart {
                     name: "file".to_string(),
-                    from_filepath: None,
                     fields: vec![DispositionField {
                         key: "filename".to_string(),
                         value: "binaryfile.tar.gz".to_string()
@@ -1400,7 +1401,7 @@ H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRA
                             value: "base64".to_string()
                         }
                     ],
-                    data: Some("H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRAq8q92hJ/dY1J7kQEqyyLq8yXYrp2ltkqkTKXYiEykYc++ZTLVcLEvQ40dXReWcYSV1pdnL/v+6n+R11mjKVG1ZQ+s3TT2FpXqjhQ+hjzE1mnGxNLkgu+7tOKWjIVmVKTC6XL9ZaeXj4VQhwKWzL+cI4zwgQuuhkh3mhTad/Hkssh3im3027X54JnQ360R/M19OT8kC7SEN7Ooi2VvrEfznHQRWzl83gxttZKmzGehzPRW/+W8X+3fvL8sFet9sS6m3EIma02071MU3Uf9KHrmV1/+y8DAAAAAAAAAAAAAAAAAAAAAMB/9A6txIuJACgAAA==".to_string())
+                    data: DataSource::Raw("H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRAq8q92hJ/dY1J7kQEqyyLq8yXYrp2ltkqkTKXYiEykYc++ZTLVcLEvQ40dXReWcYSV1pdnL/v+6n+R11mjKVG1ZQ+s3TT2FpXqjhQ+hjzE1mnGxNLkgu+7tOKWjIVmVKTC6XL9ZaeXj4VQhwKWzL+cI4zwgQuuhkh3mhTad/Hkssh3im3027X54JnQ360R/M19OT8kC7SEN7Ooi2VvrEfznHQRWzl83gxttZKmzGehzPRW/+W8X+3fvL8sFet9sS6m3EIma02071MU3Uf9KHrmV1/+y8DAAAAAAAAAAAAAAAAAAAAAMB/9A6txIuJACgAAA==".to_string())
                 }]
             }
         )
@@ -1430,15 +1431,45 @@ Content-Type: application/json
             ]
         );
 
+        assert_eq!(
+            parsed.body,
+            model::RequestBody::Text {
+                data: DataSource::Raw(
+                    r#"{
+    "key": "my-dev-value"
+}"#
+                    .to_string()
+                )
+            }
+        )
+    }
+
+    #[test]
+    pub fn parse_json_body_fileinput() {
+        let str = r#####"
+POST http://example.com/api/add
+Content-Type: application/json
+
+< ./input.json
+
+        "#####;
+
+        let (parsed, errs) = Parser::parse(str)
+            .expect("Parsing should be successful")
+            .expect("There should be a parsed request");
+        assert_eq!(errs, vec![]);
+
+        assert_eq!(
+            parsed.headers,
+            vec![Header::new("Content-Type", "application/json")]
+        );
+
         // @TODO check content
         assert_eq!(
             parsed.body,
-            model::RequestBody::Text(
-                r#"{
-    "key": "my-dev-value"
-}"#
-                .to_string()
-            )
+            model::RequestBody::Text {
+                data: DataSource::FromFilepath("./input.json".to_string())
+            }
         )
     }
 
