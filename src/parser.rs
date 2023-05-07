@@ -3,8 +3,8 @@ pub use crate::scanner::Scanner;
 use std::str::FromStr;
 
 use crate::{
-    model::model,
-    model::model::ParseErrorType,
+    model,
+    model::ParseErrorType,
     parser::model::HttpMethod,
     scanner::{LineIterator, WS_CHARS},
 };
@@ -91,14 +91,15 @@ impl Parser {
         // request line can be split over multiple lines but all lines following need to be
         // indented
         let line_iterator: LineIterator = scanner.iter_at_pos();
+
         let (indented_lines, cursor): (Vec<String>, usize) =
             line_iterator.take_while_peek(|line| {
-                line.len() > 0 && WS_CHARS.contains(&line.chars().next().unwrap())
+                !line.is_empty() && WS_CHARS.contains(&line.chars().next().unwrap())
             });
 
         scanner.set_pos(cursor);
 
-        if indented_lines.len() > 0 {
+        if !indented_lines.is_empty() {
             line.push_str(
                 &indented_lines
                     .iter()
@@ -528,7 +529,7 @@ You have additional elements: '{}'",
                 if let Err(boundary_err) = Parser::is_multipart_boundary_valid(boundary) {
                     parse_errs.push(boundary_err);
                 }
-                match dbg!(Parser::parse_multipart_body(scanner, boundary)) {
+                match Parser::parse_multipart_body(scanner, boundary) {
                     Ok(multipart_body) => body = multipart_body,
                     Err(err) => parse_errs.push(err),
                 };
@@ -537,8 +538,25 @@ You have additional elements: '{}'",
                 parse_errs.push(ParseErrorType::InvalidHeaderFields(msg))
             }
         } else {
-            // body is text
-            // @TODO: parse non multipart body!
+            if scanner.is_done() {
+                return (body, parse_errs);
+            }
+
+            let start_pos = dbg!(scanner.get_pos());
+            loop {
+                let peek_line = scanner.peek_line();
+                if peek_line.is_none() {
+                    break;
+                }
+                let peek_line = peek_line.unwrap();
+                // new request starts
+                if peek_line.starts_with("###") {
+                    break;
+                }
+                scanner.skip_to_next_line();
+            }
+            let end_pos = scanner.get_pos();
+            body = model::RequestBody::Text(scanner.get_from_to(start_pos, end_pos));
         }
         (body, parse_errs)
     }
@@ -633,7 +651,7 @@ You have additional elements: '{}'",
 #[cfg(test)]
 mod tests {
     use crate::{
-        model::model::DispositionField,
+        model::DispositionField,
         parser::model::{Header, HttpVersion},
     };
 
@@ -1387,6 +1405,43 @@ H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRA
             }
         )
     }
+
+    #[test]
+    pub fn parse_json_body() {
+        let str = r#####"
+GET http://localhost/api/json/get?id=12345
+Authorization: Basic dev-user dev-password
+Content-Type: application/json
+
+{
+    "key": "my-dev-value"
+}"#####;
+
+        let (parsed, errs) = Parser::parse(str)
+            .expect("Parsing should be successful")
+            .expect("There should be a parsed request");
+        assert_eq!(errs, vec![]);
+
+        assert_eq!(
+            parsed.headers,
+            vec![
+                Header::new("Authorization", r#"Basic dev-user dev-password"#),
+                Header::new("Content-Type", "application/json")
+            ]
+        );
+
+        // @TODO check content
+        assert_eq!(
+            parsed.body,
+            model::RequestBody::Text(
+                r#"{
+    "key": "my-dev-value"
+}"#
+                .to_string()
+            )
+        )
+    }
+
     #[test]
     pub fn has_valid_extension() {
         // ok

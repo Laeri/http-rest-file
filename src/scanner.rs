@@ -31,6 +31,12 @@ pub struct ScannerPos {
     cursor: usize,
 }
 
+impl From<ScannerPos> for usize {
+    fn from(value: ScannerPos) -> Self {
+        value.cursor
+    }
+}
+
 #[derive(Debug)]
 pub struct LineIterator<'a> {
     cursor: usize,
@@ -57,7 +63,7 @@ impl<'a> LineIterator<'a> {
                 let line = &self.characters[cursor..peek_cursor];
                 let line = line.iter().collect::<String>();
                 if !predicate(&line) {
-                    return (lines, cursor) 
+                    return (lines, cursor);
                 }
                 lines.push(line);
                 cursor = peek_cursor + 1;
@@ -66,7 +72,7 @@ impl<'a> LineIterator<'a> {
             peek_cursor += 1;
         }
 
-        return (lines, cursor);
+        (lines, cursor)
     }
 }
 
@@ -77,7 +83,7 @@ impl<'a> Iterator for LineIterator<'a> {
         if self.cursor >= len {
             return None;
         }
-        let mut peek_cursor: usize = self.cursor as usize;
+        let mut peek_cursor: usize = self.cursor;
         loop {
             if peek_cursor >= len || self.characters[peek_cursor] == '\n' {
                 let result = self.characters[self.cursor..peek_cursor]
@@ -109,8 +115,24 @@ impl Scanner {
         }
     }
 
-    pub fn set__pos(&mut self, position: usize) {
-        self.cursor = position;
+    pub fn set_pos<T: Into<usize>>(&mut self, position: T) {
+        self.cursor = position.into();
+    }
+
+    pub fn get_pos(&self) -> ScannerPos {
+        ScannerPos {
+            cursor: self.cursor,
+        }
+    }
+
+    pub fn get_from_to<S: Into<usize>, E: Into<usize>>(&self, start: S, end: E) -> String {
+        let start: usize = start.into();
+        let mut end = end.into();
+        if end >= self.cursor {
+            end = self.cursor;
+        }
+        println!("Start: {}, End: {}", start, end);
+        self.characters[start..end].iter().collect::<String>()
     }
 
     // Return the cursor which is the character index within the supplied string
@@ -337,7 +359,7 @@ impl Scanner {
         let mut peek_cursor = self.cursor;
         let len = self.characters.len();
 
-        while peek_cursor <= len && self.characters[peek_cursor] != '\n' {
+        while peek_cursor < len && self.characters[peek_cursor] != '\n' {
             peek_cursor += 1;
         }
 
@@ -415,16 +437,6 @@ impl Scanner {
                 }
             }
         }
-    }
-
-    pub fn get_pos(&self) -> ScannerPos {
-        ScannerPos {
-            cursor: self.cursor,
-        }
-    }
-
-    pub fn set_pos(&mut self, pos: usize) {
-        self.cursor = pos;
     }
 }
 
