@@ -1,5 +1,6 @@
 mod parser;
 mod scanner;
+mod model;
 pub use parser::Parser;
 pub use parser::Scanner;
 

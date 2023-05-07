@@ -1,242 +1,17 @@
-use crate::parser::node::DispositionField;
 pub use crate::scanner::Scanner;
-pub use http::Uri;
 
-use self::node::{Multipart, RequestTarget};
 use std::str::FromStr;
 
-#[derive(PartialEq, Debug)]
-#[allow(clippy::upper_case_acronyms)]
-pub enum HttpMethod {
-    GET,
-    POST,
-    PUT,
-    PATCH,
-    DELETE,
-    HEAD,
-    TRACE,
-    OPTIONS,
-    CONNECT,
-    CUSTOM(String),
-}
+use crate::{
+    model::model,
+    model::model::ParseErrorType,
+    parser::model::HttpMethod,
+    scanner::{LineIterator, WS_CHARS},
+};
 
-#[derive(PartialEq, Debug, Clone)]
-pub enum ParseErrorType {
-    Unspecified,
-    NoNameFound,
-    InvalidHttpMethod,
-    InvalidTargetUrl(String),
-    InvalidHttpVersion(String),
-    MissingRequestTargetUrl(String),
-    TooManyElementsOnRequestLine(String),
-    InvalidMultipart(String),
-    InvalidHeaderFields(String),
-}
+pub use http::Uri;
 
-mod node {
-
-    #[derive(PartialEq, Debug)]
-    pub enum RequestTarget {
-        RelativeOrigin { uri: http::Uri, string: String },
-        Absolute { uri: http::Uri, string: String },
-        Asterisk,
-        InvalidTarget(String),
-    }
-
-    #[derive(PartialEq, Debug, Clone)]
-    pub struct DispositionField {
-        pub key: String,
-        pub value: String,
-    }
-
-    #[derive(PartialEq, Debug, Clone)]
-    pub enum Multipart {
-        Bodyfile {
-            name: String,
-            filename: Option<String>,
-            filepath: String,
-            fields: Vec<DispositionField>,
-            headers: Vec<Header>,
-        },
-        Text {
-            text: String,
-            name: String,
-            fields: Vec<DispositionField>,
-            headers: Vec<Header>,
-        },
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    pub enum RequestBody {
-        None,
-        Multipart {
-            boundary: String,
-            parts: Vec<Multipart>,
-        },
-        //@TODO
-        Text(String),
-    }
-
-    impl RequestTarget {
-        pub fn has_scheme(&self) -> bool {
-            match self {
-                RequestTarget::Asterisk => false,
-                RequestTarget::Absolute { uri, .. } => uri.scheme().is_some(),
-                RequestTarget::RelativeOrigin { uri, .. } => uri.scheme().is_some(),
-                RequestTarget::InvalidTarget(_) => false,
-            }
-        }
-
-        pub fn get_string(&self) -> String {
-            match self {
-                RequestTarget::Asterisk => String::from("*"),
-                RequestTarget::Absolute { string, .. } => string.to_string(),
-                RequestTarget::RelativeOrigin { string, .. } => string.to_string(),
-                RequestTarget::InvalidTarget(string) => string.clone(),
-            }
-        }
-
-        pub fn parse(value: &str) -> Result<RequestTarget, super::ParseErrorType> {
-            if value == "*" {
-                return Ok(RequestTarget::Asterisk);
-            }
-            match value.parse::<http::Uri>() {
-                Ok(uri) => {
-                    // if we have the authority (host:port) then it is an absolute url
-                    if let Some(_authority) = uri.authority() {
-                        Ok(RequestTarget::Absolute {
-                            uri,
-                            string: value.to_string(),
-                        })
-                    } else {
-                        Ok(RequestTarget::RelativeOrigin {
-                            uri,
-                            string: value.to_string(),
-                        })
-                    }
-                }
-                // the http::uri crate cannot parse urls without scheme *but* with url, it can
-                // however parse urls without a scheme if no path is present
-                // @TODO eithr write the parser myself or use a different library. for now we add
-                // the default scheme http if this occurs and try to parse again.
-                Err(_err) => {
-                    let fixed_value = format!("http://{}", value);
-                    match fixed_value.parse::<http::Uri>() {
-                        Ok(uri) => Ok(RequestTarget::Absolute {
-                            uri,
-                            string: value.to_string(),
-                        }),
-                        _ => Err(super::ParseErrorType::InvalidTargetUrl(value.to_string())),
-                    }
-                }
-            }
-        }
-    }
-
-    impl From<&str> for RequestTarget {
-        fn from(value: &str) -> RequestTarget {
-            match RequestTarget::parse(value) {
-                Ok(t) => t,
-                Err(_err) => RequestTarget::InvalidTarget(value.to_string()),
-            }
-            // @TODO: only
-            // return a single error from parse and create conversion to parse error
-        }
-    }
-
-    #[derive(PartialEq, Debug, Clone)]
-    pub struct Header {
-        pub key: String,
-        pub value: String,
-    }
-
-    impl Header {
-        pub fn new<S: Into<String>, T: Into<String>>(key: S, value: T) -> Self {
-            Header {
-                key: key.into(),
-                value: value.into(),
-            }
-        }
-    }
-
-    #[derive(PartialEq, Debug)]
-    pub struct Request {
-        pub name: Box<Name>,
-        pub comments: Vec<Comment>,
-        pub request_line: RequestLine,
-        pub headers: Vec<Header>,
-        pub body: RequestBody,
-    }
-
-    #[derive(PartialEq, Debug)]
-    pub struct Comment {
-        pub value: String,
-    }
-
-    #[derive(PartialEq, Debug)]
-    pub struct Name {
-        pub value: String,
-    }
-
-    #[derive(PartialEq, Debug, Clone)]
-    pub struct HttpVersion {
-        pub major: u32,
-        pub minor: u32,
-    }
-
-    impl std::fmt::Display for HttpVersion {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "HTTP/{}.{}", self.major, self.minor)
-        }
-    }
-
-    impl std::str::FromStr for HttpVersion {
-        type Err = super::ParseErrorType;
-        fn from_str(s: &str) -> Result<Self, Self::Err> {
-            let err =  super::ParseErrorType::InvalidHttpVersion(String::from("Http version requires format: 'HTTP/\\d+.\\d+'. 
-For example 'HTTP/2.1'. You can also omit the version and only specify the url target of the request or the http method and the url target.
-                "));
-            if !s.starts_with("HTTP/") {
-                return Err(err);
-            }
-            let rest = &s[5..].to_string();
-            let mut split = rest.split('.');
-            let major = split.next().map(|v| v.parse::<u32>());
-            let minor = split.next().map(|v| v.parse::<u32>());
-            match (major, minor) {
-                (Some(Ok(major)), Some(Ok(minor))) => Ok(HttpVersion { major, minor }),
-                _ => Err(err),
-            }
-        }
-    }
-
-    #[derive(PartialEq, Debug)]
-    pub struct RequestLine {
-        pub method: super::HttpMethod,
-        pub target: RequestTarget,
-        pub http_version: Option<HttpVersion>, // @TODO: use enum and validate
-    }
-
-    impl Default for RequestLine {
-        fn default() -> RequestLine {
-            RequestLine {
-                method: super::HttpMethod::GET,
-                target: RequestTarget::from(""),
-                http_version: None,
-            }
-        }
-    }
-
-    impl Request {
-        pub fn get_comment_text(&self) -> String {
-            self.comments
-                .iter()
-                .map(|b| b.value.clone())
-                .collect::<Vec<String>>()
-                .join("\n")
-        }
-    }
-}
+use self::model::{Multipart, RequestTarget};
 
 pub struct Parser {}
 
@@ -250,14 +25,16 @@ impl Parser {
         }
     }
 
-    pub fn parse_name_comment(scanner: &mut Scanner) -> Result<Option<node::Name>, ParseErrorType> {
+    pub fn parse_name_comment(
+        scanner: &mut Scanner,
+    ) -> Result<Option<model::Name>, ParseErrorType> {
         scanner.skip_empty_lines();
         scanner.skip_ws();
 
         let name_regex = "\\s*#\\s*@name\\s*=\\s*(.*)[$\n]";
         if let Ok(Some(captures)) = scanner.match_regex_forward(name_regex) {
             let name = captures.first().unwrap().trim().to_string();
-            Ok(Some(node::Name { value: name }))
+            Ok(Some(model::Name { value: name }))
         } else {
             Ok(None)
         }
@@ -266,16 +43,16 @@ impl Parser {
     /// match a comment line after '###', '//' or '##' has been stripped from it
     pub fn parse_comment_line(
         scanner: &mut Scanner,
-    ) -> Result<Option<node::Comment>, ParseErrorType> {
+    ) -> Result<Option<model::Comment>, ParseErrorType> {
         scanner.skip_ws();
         match scanner.seek_return(&'\n') {
-            Ok(value) => Ok(Some(node::Comment { value })),
+            Ok(value) => Ok(Some(model::Comment { value })),
             Err(_) => Err(ParseErrorType::Unspecified),
         }
     }
 
     // @TODO: create a macro that generates a match statement for each enum variant
-    pub fn match_request_method(str: &str) -> HttpMethod {
+    pub fn match_request_method(str: &str) -> model::HttpMethod {
         match str {
             "GET" => HttpMethod::GET,
             "PUT" => HttpMethod::PUT,
@@ -292,7 +69,7 @@ impl Parser {
 
     pub fn parse_request_target(
         target_str: &str,
-    ) -> Result<Option<node::RequestTarget>, ParseErrorType> {
+    ) -> Result<Option<model::RequestTarget>, ParseErrorType> {
         let target = RequestTarget::from(target_str);
         if let RequestTarget::InvalidTarget(value) = target {
             return Err(ParseErrorType::InvalidTargetUrl(value));
@@ -305,11 +82,31 @@ impl Parser {
     // @TODO errors are ignored for now!
     pub fn parse_request_line(
         scanner: &mut Scanner,
-    ) -> Result<Option<node::RequestLine>, ParseErrorType> {
-        let line = match scanner.get_line_and_advance() {
+    ) -> Result<Option<model::RequestLine>, ParseErrorType> {
+        let mut line = match scanner.get_line_and_advance() {
             Some(line) => line,
             _ => String::new(),
         };
+
+        // request line can be split over multiple lines but all lines following need to be
+        // indented
+        let line_iterator: LineIterator = scanner.iter_at_pos();
+        let (indented_lines, cursor): (Vec<String>, usize) =
+            line_iterator.take_while_peek(|line| {
+                line.len() > 0 && WS_CHARS.contains(&line.chars().next().unwrap())
+            });
+
+        scanner.set_pos(cursor);
+
+        if indented_lines.len() > 0 {
+            line.push_str(
+                &indented_lines
+                    .iter()
+                    .map(|l| l.trim().to_owned())
+                    .collect::<Vec<String>>()
+                    .join(""),
+            );
+        }
 
         let line_scanner = Scanner::new(&line);
         let tokens: Vec<String> = line_scanner.get_tokens();
@@ -320,7 +117,7 @@ impl Parser {
                 // @TODO: why can't we pass target_str or &(*target_str) directly?
                 let str: &str = target_str;
                 (
-                    Some(node::RequestLine {
+                    Some(model::RequestLine {
                         target: RequestTarget::from(str),
                         method: HttpMethod::GET,
                         http_version: None,
@@ -333,7 +130,7 @@ impl Parser {
                 let str: &str = target_str;
 
                 (
-                    Some(node::RequestLine {
+                    Some(model::RequestLine {
                         target: RequestTarget::from(str),
                         method: Parser::match_request_method(method),
                         http_version: None,
@@ -343,7 +140,7 @@ impl Parser {
             }
 
             [method, target_str, http_version_str] => {
-                let result = node::HttpVersion::from_str(http_version_str);
+                let result = model::HttpVersion::from_str(http_version_str);
                 let (http_version, err) = match result {
                     Ok(version) => (Some(version), None),
                     Err(_) => (None, None),
@@ -352,7 +149,7 @@ impl Parser {
                 // @TODO: why can't we pass target_str or &(*target_str) directly?
                 let str: &str = target_str;
                 (
-                    Some(node::RequestLine {
+                    Some(model::RequestLine {
                         target: RequestTarget::from(str),
                         method: Parser::match_request_method(method),
                         http_version,
@@ -375,7 +172,7 @@ impl Parser {
                     parse_errs.push(parse_error);
                 } */
                 // @TODO: why can't we pass target_str or &(*target_str) directly?
-                let result = node::HttpVersion::from_str(http_version_str);
+                let result = model::HttpVersion::from_str(http_version_str);
                 let http_version = match result {
                     Ok(version) => Some(version),
                     Err(_) => None,
@@ -383,7 +180,7 @@ impl Parser {
 
                 let str: &str = target_str;
                 (
-                    Some(node::RequestLine {
+                    Some(model::RequestLine {
                         target: RequestTarget::from(str),
                         method: Parser::match_request_method(method),
                         http_version,
@@ -402,7 +199,7 @@ You have additional elements: '{}'",
         Ok(request_line)
     }
 
-    pub fn parse_comment(scanner: &mut Scanner) -> Result<Option<node::Comment>, ParseErrorType> {
+    pub fn parse_comment(scanner: &mut Scanner) -> Result<Option<model::Comment>, ParseErrorType> {
         scanner.skip_empty_lines();
         // comments can be indented
         scanner.skip_ws();
@@ -431,7 +228,7 @@ You have additional elements: '{}'",
     pub fn parse_multipart_part(
         scanner: &mut Scanner,
         boundary: &str,
-    ) -> Result<node::Multipart, ParseErrorType> {
+    ) -> Result<model::Multipart, ParseErrorType> {
         let boundary_line = format!("--{}", boundary);
         let multipart_end_line = format!("--{}--", boundary);
 
@@ -474,14 +271,14 @@ You have additional elements: '{}'",
                         disposition_type
                     )));
                 }
-                let mut fields: Vec<node::DispositionField> = Vec::new();
+                let mut fields: Vec<model::DispositionField> = Vec::new();
                 for disposition_field in parts_iter {
                     match disposition_field.split('=').map(|p| p.trim()).collect::<Vec<&str>>()[..] {
                         [key, mut value] => {
                             if value.starts_with('"') && value.ends_with('"') {
                                 value = &value[1..(value.len()-1)];
                             }
-                            let field = node::DispositionField {key: key.to_string(), value: value.to_string()};
+                            let field = model::DispositionField {key: key.to_string(), value: value.to_string()};
                             fields.push(field);
                         },
                             _ => {
@@ -504,14 +301,6 @@ You have additional elements: '{}'",
 
         let name = fields.remove(name_index.unwrap());
 
-        let filename_pos = fields.iter().position(|field| field.key == "filename");
-
-        let mut filename: Option<DispositionField> = None;
-
-        if let Some(filename_pos) = filename_pos {
-            filename = Some(fields.remove(filename_pos));
-        }
-            
         if !scanner.match_str_forward("\n") {
             println!("SCANNER: {}", scanner.debug_string());
             return Err(ParseErrorType::InvalidMultipart(
@@ -542,12 +331,12 @@ You have additional elements: '{}'",
 
             let file_path = &line[1..].trim();
             // @TODO is name expected?
-            Ok(Multipart::Bodyfile {
+            Ok(Multipart {
                 name: name.value,
-                filename: filename.map(|f| f.value),
-                filepath: file_path.to_string(),
+                from_filepath: Some(file_path.to_string()),
                 fields,
-                headers: part_headers.to_vec()
+                headers: part_headers.to_vec(),
+                data: None, // @TODO: when to read in data from file?
             })
         } else {
             let mut text = String::new();
@@ -562,11 +351,12 @@ You have additional elements: '{}'",
                 };
                 let peek_line = peek_line.unwrap();
                 if peek_line == boundary_line || peek_line == multipart_end_line {
-                    return Ok(Multipart::Text {
-                        text,
+                    return Ok(Multipart {
                         name: name.value,
+                        from_filepath: None,
                         fields,
                         headers: part_headers.to_owned(),
+                        data: Some(text),
                     });
                 }
                 let next = scanner.get_line_and_advance().unwrap();
@@ -585,7 +375,7 @@ You have additional elements: '{}'",
     pub fn parse_multipart_body(
         scanner: &mut Scanner,
         boundary: &str,
-    ) -> Result<node::RequestBody, ParseErrorType> {
+    ) -> Result<model::RequestBody, ParseErrorType> {
         scanner.skip_empty_lines();
 
         // parse multipart @TODO check content type is a-ok!
@@ -620,16 +410,16 @@ You have additional elements: '{}'",
                 )));
             }
         }
-        Ok(node::RequestBody::Multipart {
+        Ok(model::RequestBody::Multipart {
             boundary: boundary.to_string(),
             parts,
         })
     }
 
-    pub fn parse_headers(scanner: &mut Scanner) -> Result<Vec<node::Header>, ParseErrorType> {
-        let mut headers: Vec<node::Header> = Vec::new();
+    pub fn parse_headers(scanner: &mut Scanner) -> Result<Vec<model::Header>, ParseErrorType> {
+        let mut headers: Vec<model::Header> = Vec::new();
 
-        let header_regex = regex::Regex::from_str("(.+):\\s*(.+)\\s*").unwrap();
+        let header_regex = regex::Regex::from_str("^([^:]+):\\s*(.+)\\s*").unwrap();
 
         loop {
             if scanner.is_done() {
@@ -655,7 +445,7 @@ You have additional elements: '{}'",
             match (captures.get(1), captures.get(2)) {
                 (Some(key_match), Some(value_match)) => {
                     //@TODO: validate header fields
-                    headers.push(node::Header {
+                    headers.push(model::Header {
                         key: key_match.as_str().to_string(),
                         value: value_match.as_str().to_string(),
                     })
@@ -709,9 +499,9 @@ You have additional elements: '{}'",
 
     pub fn parse_body(
         scanner: &mut Scanner,
-        headers: &[node::Header],
-    ) -> (node::RequestBody, Vec<ParseErrorType>) {
-        let mut body = node::RequestBody::None;
+        headers: &[model::Header],
+    ) -> (model::RequestBody, Vec<ParseErrorType>) {
+        let mut body = model::RequestBody::None;
         let mut parse_errs: Vec<ParseErrorType> = Vec::new();
         if let Some(multipart_header) = headers.iter().find(|header| {
             header.key == "Content-Type" && header.value.starts_with("multipart/form-data")
@@ -755,9 +545,9 @@ You have additional elements: '{}'",
 
     pub fn parse_request(
         scanner: &mut Scanner,
-    ) -> Result<Option<(node::Request, Vec<ParseErrorType>)>, ParseErrorType> {
+    ) -> Result<Option<(model::Request, Vec<ParseErrorType>)>, ParseErrorType> {
         let mut comments = Vec::new();
-        let mut name: Option<node::Name> = None;
+        let mut name: Option<model::Name> = None;
         let mut parse_errs: Vec<ParseErrorType> = Vec::new();
 
         loop {
@@ -780,10 +570,10 @@ You have additional elements: '{}'",
 
         let request_line = match Parser::parse_request_line(scanner) {
             Ok(Some(line)) => line,
-            Ok(None) => node::RequestLine::default(),
+            Ok(None) => model::RequestLine::default(),
             Err(parse_error) => {
                 parse_errs.push(parse_error);
-                node::RequestLine::default()
+                model::RequestLine::default()
             }
         };
 
@@ -791,7 +581,7 @@ You have additional elements: '{}'",
             Ok(headers) => headers,
             Err(parse_err) => {
                 parse_errs.push(parse_err);
-                Vec::<node::Header>::new()
+                Vec::<model::Header>::new()
             }
         };
 
@@ -802,19 +592,19 @@ You have additional elements: '{}'",
         parse_errs.append(&mut body_parse_errs);
 
         if name.is_none() {
-            name = Some(node::Name {
+            name = Some(model::Name {
                 value: String::new(),
             });
         }
 
         let name_box = match name {
             Some(name) => Box::new(name),
-            None => Box::new(node::Name {
+            None => Box::new(model::Name {
                 value: String::new(),
             }),
         };
 
-        let mut request_node = node::Request {
+        let mut request_node = model::Request {
             name: name_box,
             comments,
             request_line,
@@ -833,7 +623,7 @@ You have additional elements: '{}'",
 
     pub fn parse(
         string: &str,
-    ) -> Result<Option<(node::Request, Vec<ParseErrorType>)>, ParseErrorType> {
+    ) -> Result<Option<(model::Request, Vec<ParseErrorType>)>, ParseErrorType> {
         let mut scanner = Scanner::new(string);
 
         Parser::parse_request(&mut scanner)
@@ -842,7 +632,10 @@ You have additional elements: '{}'",
 
 #[cfg(test)]
 mod tests {
-    use crate::parser::node::Header;
+    use crate::{
+        model::model::DispositionField,
+        parser::model::{Header, HttpVersion},
+    };
 
     use super::*;
 
@@ -855,18 +648,18 @@ https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = node::Request {
-            name: Box::new(node::Name {
+        let expected = model::Request {
+            name: Box::new(model::Name {
                 value: String::from("test name"),
             }),
             comments: Vec::new(),
-            request_line: node::RequestLine {
+            request_line: model::RequestLine {
                 method: HttpMethod::GET,
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
             headers: Vec::new(),
-            body: node::RequestBody::None,
+            body: model::RequestBody::None,
         };
 
         match parsed {
@@ -887,18 +680,18 @@ https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = node::Request {
-            name: Box::new(node::Name {
+        let expected = model::Request {
+            name: Box::new(model::Name {
                 value: String::from("test name"),
             }),
             comments: Vec::new(),
-            request_line: node::RequestLine {
+            request_line: model::RequestLine {
                 method: HttpMethod::GET,
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
             headers: Vec::new(),
-            body: node::RequestBody::None,
+            body: model::RequestBody::None,
         };
 
         match parsed {
@@ -937,18 +730,18 @@ CUSTOMVERB https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = node::Request {
-            name: Box::new(node::Name {
+        let expected = model::Request {
+            name: Box::new(model::Name {
                 value: String::from("test name"),
             }),
             comments: Vec::new(),
-            request_line: node::RequestLine {
+            request_line: model::RequestLine {
                 method: HttpMethod::CUSTOM("CUSTOMVERB".to_string()),
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
             headers: Vec::new(),
-            body: node::RequestBody::None,
+            body: model::RequestBody::None,
         };
 
         match parsed {
@@ -969,18 +762,18 @@ POST https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = node::Request {
-            name: Box::new(node::Name {
+        let expected = model::Request {
+            name: Box::new(model::Name {
                 value: String::from("test name"),
             }),
             comments: Vec::new(),
-            request_line: node::RequestLine {
+            request_line: model::RequestLine {
                 method: HttpMethod::POST,
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
             headers: Vec::new(),
-            body: node::RequestBody::None,
+            body: model::RequestBody::None,
         };
 
         match parsed {
@@ -1001,18 +794,18 @@ POST https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = node::Request {
-            name: Box::new(node::Name {
+        let expected = model::Request {
+            name: Box::new(model::Name {
                 value: String::from("test name"),
             }),
             comments: Vec::new(),
-            request_line: node::RequestLine {
+            request_line: model::RequestLine {
                 method: HttpMethod::POST,
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
             headers: Vec::new(),
-            body: node::RequestBody::None,
+            body: model::RequestBody::None,
         };
 
         match parsed {
@@ -1076,7 +869,7 @@ POST https://httpbin.org
         );
         assert_eq!(
             request.request_line.http_version,
-            Some(node::HttpVersion { major: 1, minor: 1 })
+            Some(model::HttpVersion { major: 1, minor: 1 })
         );
         assert_eq!(errs, vec![]);
     }
@@ -1136,7 +929,7 @@ POST https://httpbin.org
         assert_eq!(request.request_line.method, HttpMethod::GET);
         assert_eq!(
             request.request_line.http_version,
-            Some(node::HttpVersion { major: 1, minor: 1 })
+            Some(model::HttpVersion { major: 1, minor: 1 })
         );
         assert_eq!(errs, vec![]);
     }
@@ -1232,26 +1025,107 @@ POST https://httpbin.org
         assert_eq!(request.request_line.method, HttpMethod::GET);
         assert_eq!(
             request.request_line.http_version,
-            Some(node::HttpVersion { major: 1, minor: 1 })
+            Some(model::HttpVersion { major: 1, minor: 1 })
         );
         assert_eq!(errs, vec![]);
     }
 
     #[test]
     pub fn validate_http_version() {
-        let version = node::HttpVersion::from_str("HTTP/1.1").expect("Version 1.1 to be valid");
-        assert_eq!(version, node::HttpVersion { major: 1, minor: 1 });
+        let version = model::HttpVersion::from_str("HTTP/1.1").expect("Version 1.1 to be valid");
+        assert_eq!(version, model::HttpVersion { major: 1, minor: 1 });
 
-        let version = node::HttpVersion::from_str("HTTP/1.2").expect("Version 1.2 to be valid");
-        assert_eq!(version, node::HttpVersion { major: 1, minor: 2 });
+        let version = model::HttpVersion::from_str("HTTP/1.2").expect("Version 1.2 to be valid");
+        assert_eq!(version, model::HttpVersion { major: 1, minor: 2 });
 
-        let version = node::HttpVersion::from_str("HTTP/2.0").expect("Version 2.0 to be valid");
-        assert_eq!(version, node::HttpVersion { major: 2, minor: 0 });
+        let version = model::HttpVersion::from_str("HTTP/2.0").expect("Version 2.0 to be valid");
+        assert_eq!(version, model::HttpVersion { major: 2, minor: 0 });
 
-        let version = node::HttpVersion::from_str("HTTP/2.1").expect("Version 2.1 to be valid");
-        assert_eq!(version, node::HttpVersion { major: 2, minor: 1 });
+        let version = model::HttpVersion::from_str("HTTP/2.1").expect("Version 2.1 to be valid");
+        assert_eq!(version, model::HttpVersion { major: 2, minor: 1 });
 
-        assert!(node::HttpVersion::from_str("invalid").is_err());
+        assert!(model::HttpVersion::from_str("invalid").is_err());
+    }
+
+    #[test]
+    pub fn request_target_multiline() {
+        let str = r#####"
+GET https://test.com:8080
+    /get
+    /html
+    ?id=123
+    &value=test
+
+        "#####;
+        let (request, errs) = Parser::parse(str).unwrap().unwrap();
+        assert_eq!(errs, vec![]);
+        let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            request.request_line.target,
+            RequestTarget::Absolute {
+                uri: expected_uri,
+                string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
+            }
+        );
+        assert_eq!(request.request_line.http_version, None);
+        assert_eq!(request.request_line.method, HttpMethod::GET);
+    }
+
+    #[test]
+    pub fn request_target_multiline_no_method() {
+        let str = r#####"
+https://test.com:8080
+    /get
+    /html
+    ?id=123
+    &value=test
+
+        "#####;
+        let (request, errs) = Parser::parse(str).unwrap().unwrap();
+        assert_eq!(errs, vec![]);
+        let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            request.request_line.target,
+            RequestTarget::Absolute {
+                uri: expected_uri,
+                string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
+            }
+        );
+        assert_eq!(request.request_line.http_version, None);
+        assert_eq!(request.request_line.method, HttpMethod::GET);
+    }
+
+    #[test]
+    pub fn request_target_multiline_with_version() {
+        let str = r#####"
+GET https://test.com:8080
+    /get
+    /html
+    ?id=123
+    &value=test HTTP/2.1
+
+        "#####;
+        let (request, errs) = Parser::parse(str).unwrap().unwrap();
+        assert_eq!(errs, vec![]);
+        let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            request.request_line.target,
+            RequestTarget::Absolute {
+                uri: expected_uri,
+                string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
+            }
+        );
+        assert_eq!(
+            request.request_line.http_version,
+            Some(HttpVersion { major: 2, minor: 1 })
+        );
+        assert_eq!(request.request_line.method, HttpMethod::GET);
     }
 
     #[test]
@@ -1269,6 +1143,20 @@ Key3: Value3
         assert_eq!(parsed[0], Header::new("Key1", "Value1"));
         assert_eq!(parsed[1], Header::new("Key2", "Value2"));
         assert_eq!(parsed[2], Header::new("Key3", "Value3"));
+    }
+
+    #[test]
+    pub fn parse_headers_with_colon() {
+        let str = r###"Host: localhost:8080
+Custom: ::::::
+
+        "###;
+        let mut scanner = Scanner::new(str);
+        let parsed = Parser::parse_headers(&mut scanner).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], Header::new("Host", "localhost:8080"));
+        assert_eq!(parsed[1], Header::new("Custom", "::::::"));
     }
 
     #[test]
@@ -1300,12 +1188,12 @@ Content-Disposition: form-data; name="part1_name"
 
         assert_eq!(
             parsed.body,
-            node::RequestBody::Multipart {
+            model::RequestBody::Multipart {
                 boundary: "--test_boundary".to_string(),
-                parts: vec![Multipart::Bodyfile {
+                parts: vec![Multipart {
                     name: "part1_name".to_string(),
-                    filename: None,
-                    filepath: "path/to/file".to_string(),
+                    from_filepath: Some("path/to/file".to_string()),
+                    data: None,
                     fields: vec![],
                     headers: vec![]
                 }]
@@ -1349,20 +1237,22 @@ more content
 
         assert_eq!(
             parsed.body,
-            node::RequestBody::Multipart {
+            model::RequestBody::Multipart {
                 boundary: "--test.?)()test".to_string(),
                 parts: vec![
-                    Multipart::Text {
-                        text: "some text\n".to_string(),
+                    Multipart {
                         name: "text".to_string(),
                         fields: vec![],
-                        headers: vec![]
+                        headers: vec![],
+                        data: Some("some text\n".to_string()),
+                        from_filepath: None
                     },
-                    Multipart::Text {
-                        text: "more content\n\n".to_string(),
+                    Multipart {
                         name: "text".to_string(),
                         fields: vec![],
-                        headers: vec![]
+                        headers: vec![],
+                        data: Some("more content\n\n".to_string()),
+                        from_filepath: None
                     }
                 ]
             }
@@ -1404,23 +1294,28 @@ Content-Type: application/json
 
         assert_eq!(
             parsed.body,
-            node::RequestBody::Multipart {
+            model::RequestBody::Multipart {
                 boundary: "WebAppBoundary".to_string(),
                 parts: vec![
-                    Multipart::Text {
-                        text: "Name".to_string(),
+                    Multipart {
+                        data: Some("Name".to_string()),
                         name: "element-name".to_string(),
                         fields: vec![],
+                        from_filepath: None,
                         headers: vec![Header {
                             key: "Content-Type".to_string(),
                             value: "text/plain".to_string()
                         }]
                     },
-                    Multipart::Bodyfile {
-                        name: "data".to_string(),
-                        filename: Some("data.json".to_string()),
-                        filepath: "./request-form-data.json".to_string(),
-                        fields: vec![],
+                    Multipart {
+                        name: "data".to_string(), // @TODO
+                        data: None,
+                        // @TODO: check within fields, filename: Some("data.json".to_string()),
+                        from_filepath: Some("./request-form-data.json".to_string()),
+                        fields: vec![DispositionField {
+                            key: "filename".to_string(),
+                            value: "data.json".to_string()
+                        }],
                         headers: vec![Header {
                             key: "Content-Type".to_string(),
                             value: "application/json".to_string()
@@ -1431,6 +1326,67 @@ Content-Type: application/json
         )
     }
 
+    #[test]
+    pub fn parse_multipart_binary() {
+        let str = r#####"
+POST /upload HTTP/1.1
+Host: localhost:8080
+Content-Type: multipart/form-data; boundary=/////////////////////////////
+Content-Length: 676
+
+--/////////////////////////////
+Content-Disposition: form-data; name="file"; filename="binaryfile.tar.gz"
+Content-Type: application/x-gzip
+Content-Transfer-Encoding: base64
+
+H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRAq8q92hJ/dY1J7kQEqyyLq8yXYrp2ltkqkTKXYiEykYc++ZTLVcLEvQ40dXReWcYSV1pdnL/v+6n+R11mjKVG1ZQ+s3TT2FpXqjhQ+hjzE1mnGxNLkgu+7tOKWjIVmVKTC6XL9ZaeXj4VQhwKWzL+cI4zwgQuuhkh3mhTad/Hkssh3im3027X54JnQ360R/M19OT8kC7SEN7Ooi2VvrEfznHQRWzl83gxttZKmzGehzPRW/+W8X+3fvL8sFet9sS6m3EIma02071MU3Uf9KHrmV1/+y8DAAAAAAAAAAAAAAAAAAAAAMB/9A6txIuJACgAAA==
+--/////////////////////////////--
+        "#####;
+
+        let (parsed, errs) = Parser::parse(str)
+            .expect("Parsing should be successful")
+            .expect("There should be a parsed request");
+        assert_eq!(errs, vec![]);
+
+        assert_eq!(
+            parsed.headers,
+            vec![
+                Header::new("Host", "localhost:8080"),
+                Header::new(
+                    "Content-Type",
+                    r#"multipart/form-data; boundary=/////////////////////////////"#
+                ),
+                Header::new("Content-Length", "676")
+            ]
+        );
+
+        // @TODO check content
+        assert_eq!(
+            parsed.body,
+            model::RequestBody::Multipart {
+                boundary: r#"/////////////////////////////"#.to_string(),
+                parts: vec![model::Multipart {
+                    name: "file".to_string(),
+                    from_filepath: None,
+                    fields: vec![DispositionField {
+                        key: "filename".to_string(),
+                        value: "binaryfile.tar.gz".to_string()
+                    }],
+                    headers: vec![
+                        Header {
+                            key: "Content-Type".to_string(),
+                            value: "application/x-gzip".to_string()
+                        },
+                        Header {
+                            key: "Content-Transfer-Encoding".to_string(),
+                            value: "base64".to_string()
+                        }
+                    ],
+                    data: Some("H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRAq8q92hJ/dY1J7kQEqyyLq8yXYrp2ltkqkTKXYiEykYc++ZTLVcLEvQ40dXReWcYSV1pdnL/v+6n+R11mjKVG1ZQ+s3TT2FpXqjhQ+hjzE1mnGxNLkgu+7tOKWjIVmVKTC6XL9ZaeXj4VQhwKWzL+cI4zwgQuuhkh3mhTad/Hkssh3im3027X54JnQ360R/M19OT8kC7SEN7Ooi2VvrEfznHQRWzl83gxttZKmzGehzPRW/+W8X+3fvL8sFet9sS6m3EIma02071MU3Uf9KHrmV1/+y8DAAAAAAAAAAAAAAAAAAAAAMB/9A6txIuJACgAAA==".to_string())
+                }]
+            }
+        )
+    }
     #[test]
     pub fn has_valid_extension() {
         // ok

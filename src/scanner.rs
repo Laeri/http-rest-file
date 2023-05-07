@@ -31,8 +31,68 @@ pub struct ScannerPos {
     cursor: usize,
 }
 
+#[derive(Debug)]
+pub struct LineIterator<'a> {
+    cursor: usize,
+    characters: &'a [char],
+}
+
+impl<'a> LineIterator<'a> {
+    pub fn take_while_peek<P>(&self, predicate: P) -> (Vec<String>, usize)
+    where
+        Self: Sized,
+        P: Fn(&str) -> bool,
+    {
+        let len = self.characters.len();
+        let mut cursor = self.cursor;
+        let mut peek_cursor = self.cursor;
+
+        let mut lines: Vec<String> = Vec::new();
+
+        loop {
+            if peek_cursor >= len {
+                break;
+            }
+            if self.characters[peek_cursor] == '\n' {
+                let line = &self.characters[cursor..peek_cursor];
+                let line = line.iter().collect::<String>();
+                if !predicate(&line) {
+                    return (lines, cursor) 
+                }
+                lines.push(line);
+                cursor = peek_cursor + 1;
+            }
+
+            peek_cursor += 1;
+        }
+
+        return (lines, cursor);
+    }
+}
+
+impl<'a> Iterator for LineIterator<'a> {
+    type Item = String;
+    fn next(&mut self) -> Option<Self::Item> {
+        let len: usize = self.characters.len();
+        if self.cursor >= len {
+            return None;
+        }
+        let mut peek_cursor: usize = self.cursor as usize;
+        loop {
+            if peek_cursor >= len || self.characters[peek_cursor] == '\n' {
+                let result = self.characters[self.cursor..peek_cursor]
+                    .iter()
+                    .collect::<String>();
+                self.cursor = peek_cursor;
+                return Some(result);
+            }
+            peek_cursor += 1;
+        }
+    }
+}
+
 // whitespace character which are not newlines
-const WS_CHARS: [char; 4] = [' ', '\t', '\r', '\u{000C}'];
+pub const WS_CHARS: [char; 4] = [' ', '\t', '\r', '\u{000C}'];
 
 impl Scanner {
     pub fn new(string: &str) -> Scanner {
@@ -40,6 +100,17 @@ impl Scanner {
             cursor: 0,
             characters: string.chars().collect(),
         }
+    }
+
+    pub fn iter_at_pos(&mut self) -> LineIterator {
+        LineIterator {
+            characters: &self.characters[..],
+            cursor: self.cursor,
+        }
+    }
+
+    pub fn set__pos(&mut self, position: usize) {
+        self.cursor = position;
     }
 
     // Return the cursor which is the character index within the supplied string
@@ -231,7 +302,6 @@ impl Scanner {
         };
     }
 
-
     /// Get the current line (excluding the new line character) and advance to the next.
     pub fn get_line_and_advance(&mut self) -> Option<String> {
         let mut peek_cursor = self.cursor;
@@ -353,8 +423,8 @@ impl Scanner {
         }
     }
 
-    pub fn set_pos(&mut self, pos: &ScannerPos) {
-        self.cursor = pos.cursor;
+    pub fn set_pos(&mut self, pos: usize) {
+        self.cursor = pos;
     }
 }
 
