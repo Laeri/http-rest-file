@@ -25,16 +25,14 @@ impl Parser {
         }
     }
 
-    pub fn parse_name_comment(
-        scanner: &mut Scanner,
-    ) -> Result<Option<model::Name>, ParseErrorType> {
+    pub fn parse_name_comment(scanner: &mut Scanner) -> Result<Option<String>, ParseErrorType> {
         scanner.skip_empty_lines();
         scanner.skip_ws();
 
         let name_regex = "\\s*#\\s*@name\\s*=\\s*(.*)[$\n]";
         if let Ok(Some(captures)) = scanner.match_regex_forward(name_regex) {
             let name = captures.first().unwrap().trim().to_string();
-            Ok(Some(model::Name { value: name }))
+            Ok(Some(name))
         } else {
             Ok(None)
         }
@@ -47,7 +45,7 @@ impl Parser {
         scanner.skip_ws();
         match scanner.seek_return(&'\n') {
             Ok(value) => Ok(Some(model::Comment { value })),
-            Err(_) => Err(ParseErrorType::Unspecified),
+            Err(_) => Err(ParseErrorType::General),
         }
     }
 
@@ -561,9 +559,11 @@ You have additional elements: '{}'",
                     data: DataSource::FromFilepath(path.to_string()),
                 };
             } else {
-                body = model::RequestBody::Text {
-                    data: DataSource::Raw(body_str),
-                };
+                if body_str.len() > 0 {
+                    body = model::RequestBody::Text {
+                        data: DataSource::Raw(body_str),
+                    };
+                }
             }
         }
         (body, parse_errs)
@@ -571,10 +571,12 @@ You have additional elements: '{}'",
 
     pub fn parse_request(
         scanner: &mut Scanner,
-    ) -> Result<Option<(model::Request, Vec<ParseErrorType>)>, ParseErrorType> {
+    ) -> Result<Option<(model::Request, Vec<ParseErrorType>)>, Vec<ParseErrorType>> {
         let mut comments = Vec::new();
-        let mut name: Option<model::Name> = None;
+        let mut name: Option<String> = None;
         let mut parse_errs: Vec<ParseErrorType> = Vec::new();
+
+        scanner.skip_empty_lines();
 
         loop {
             if let Ok(Some(name_node)) = Parser::parse_name_comment(scanner) {
@@ -596,12 +598,30 @@ You have additional elements: '{}'",
 
         let request_line = match Parser::parse_request_line(scanner) {
             Ok(Some(line)) => line,
-            Ok(None) => model::RequestLine::default(),
+            Ok(None) => {
+                return Ok(None);
+            }
             Err(parse_error) => {
                 parse_errs.push(parse_error);
-                model::RequestLine::default()
+                return Err(parse_errs);
             }
         };
+
+        // end of request reached?
+        {
+            let peek_line = scanner.peek_line();
+            if peek_line.is_some() && peek_line.unwrap().trim().starts_with("###") {
+                let request_node = model::Request {
+                    name,
+                    comments,
+                    request_line,
+                    // no headers nor body parsed
+                    headers: vec![],
+                    body: model::RequestBody::None,
+                };
+                return Ok(Some((request_node, parse_errs)));
+            }
+        }
 
         let headers = match Parser::parse_headers(scanner) {
             Ok(headers) => headers,
@@ -617,21 +637,8 @@ You have additional elements: '{}'",
         let (body, mut body_parse_errs) = Parser::parse_body(scanner, &headers);
         parse_errs.append(&mut body_parse_errs);
 
-        if name.is_none() {
-            name = Some(model::Name {
-                value: String::new(),
-            });
-        }
-
-        let name_box = match name {
-            Some(name) => Box::new(name),
-            None => Box::new(model::Name {
-                value: String::new(),
-            }),
-        };
-
         let mut request_node = model::Request {
-            name: name_box,
+            name,
             comments,
             request_line,
             headers,
@@ -640,19 +647,46 @@ You have additional elements: '{}'",
 
         // if no name set we use the first comment as name @TODO: only ### comment is accepted?
         #[allow(clippy::comparison_to_empty)]
-        if request_node.name.value == "" && !request_node.comments.is_empty() {
+        if request_node.name.is_none() && !request_node.comments.is_empty() {
             let first_comment = request_node.comments.remove(0);
-            request_node.name.value = first_comment.value;
+            request_node.name = Some(first_comment.value);
         }
         Ok(Some((request_node, parse_errs)))
     }
 
     pub fn parse(
         string: &str,
-    ) -> Result<Option<(model::Request, Vec<ParseErrorType>)>, ParseErrorType> {
+    ) -> Result<Option<(Vec<model::Request>, Vec<ParseErrorType>)>, ParseErrorType> {
         let mut scanner = Scanner::new(string);
 
-        Parser::parse_request(&mut scanner)
+        let mut requests: Vec<model::Request> = Vec::new();
+        let mut errs: Vec<ParseErrorType> = Vec::new();
+
+        loop {
+            scanner.skip_empty_lines();
+            match Parser::parse_request(&mut scanner) {
+                Ok(Some((request, current_errs))) => {
+                    requests.push(request);
+                    errs.extend(current_errs);
+                }
+                Ok(None) => {}
+                Err(parse_errs) => {
+                    errs.extend(parse_errs);
+                }
+            }
+            scanner.skip_empty_lines();
+            if scanner.is_done() {
+                break;
+            }
+            if !scanner.match_str_forward("###") {
+                let msg = format!(
+                    "Expected request to be terminated with '###' found {}",
+                    scanner.peek_line().map_or("".to_string(), |l| l)
+                );
+                errs.push(ParseErrorType::InvalidRequestBoundary(msg))
+            }
+        }
+        Ok(Some((requests, errs)))
     }
 }
 
@@ -674,10 +708,8 @@ https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = model::Request {
-            name: Box::new(model::Name {
-                value: String::from("test name"),
-            }),
+        let expected = vec![model::Request {
+            name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
                 method: HttpMethod::GET,
@@ -686,7 +718,7 @@ https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
-        };
+        }];
 
         match parsed {
             Ok(Some((parse_tree, errs))) => {
@@ -706,10 +738,8 @@ https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = model::Request {
-            name: Box::new(model::Name {
-                value: String::from("test name"),
-            }),
+        let expected = vec![model::Request {
+            name: Some("test name".to_string()),
             comments: Vec::new(),
             request_line: model::RequestLine {
                 method: HttpMethod::GET,
@@ -718,7 +748,7 @@ https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
-        };
+        }];
 
         match parsed {
             Ok(Some((parse_tree, errs))) => {
@@ -739,12 +769,17 @@ https://httpbin.org
 GET https://test.com
 ";
         // if there is a ### comment and a @name section use the @name section as name
-        let (parsed, errs) = Parser::parse(str).unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse(str).unwrap().unwrap();
+        assert!(requests.len() == 1);
+        let request = requests.remove(0);
         assert!(errs.len() == 0);
-        assert_eq!(parsed.name.value, "actual request name");
-        assert_eq!(parsed.comments.len(), 2);
-        assert_eq!(parsed.comments[0].value, "Just a comment");
-        assert_eq!(parsed.comments[1].value, "invalid comment but still parsed");
+        assert_eq!(request.name, Some("actual request name".to_string()));
+        assert_eq!(request.comments.len(), 2);
+        assert_eq!(request.comments[0].value, "Just a comment");
+        assert_eq!(
+            request.comments[1].value,
+            "invalid comment but still parsed"
+        );
     }
 
     #[test]
@@ -756,10 +791,8 @@ CUSTOMVERB https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = model::Request {
-            name: Box::new(model::Name {
-                value: String::from("test name"),
-            }),
+        let expected = vec![model::Request {
+            name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
                 method: HttpMethod::CUSTOM("CUSTOMVERB".to_string()),
@@ -768,7 +801,7 @@ CUSTOMVERB https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
-        };
+        }];
 
         match parsed {
             Ok(Some((parse_tree, errs))) => {
@@ -788,10 +821,8 @@ POST https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = model::Request {
-            name: Box::new(model::Name {
-                value: String::from("test name"),
-            }),
+        let expected = vec![model::Request {
+            name: Some("test name".to_string()),
             comments: Vec::new(),
             request_line: model::RequestLine {
                 method: HttpMethod::POST,
@@ -800,7 +831,7 @@ POST https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
-        };
+        }];
 
         match parsed {
             Ok(Some((parse_tree, errs))) => {
@@ -820,10 +851,8 @@ POST https://httpbin.org
 ";
         let parsed = Parser::parse(str);
 
-        let expected = model::Request {
-            name: Box::new(model::Name {
-                value: String::from("test name"),
-            }),
+        let expected = vec![model::Request {
+            name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
                 method: HttpMethod::POST,
@@ -832,14 +861,12 @@ POST https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
-        };
+        }];
 
+        // whitespace before or after name should be removed
         match parsed {
             Ok(Some((parse_tree, errs))) => {
-                assert_eq!(
-                    parse_tree.name.value, "test name",
-                    "whitespace before or after name should be removed"
-                );
+                assert_eq!(parse_tree[0].name, Some("test name".to_string()));
                 assert!(errs.is_empty());
                 assert_eq!(parse_tree, expected)
             }
@@ -863,7 +890,7 @@ POST https://httpbin.org
             Ok(Some((parse_tree, errs))) => {
                 assert!(errs.is_empty());
                 assert_eq!(
-                    parse_tree.get_comment_text(),
+                    parse_tree[0].get_comment_text(),
                     "Comment one\nComment line two    \nThis comment type is also allowed      ",
                     "parsed: {:?}, {:?}",
                     parse_tree,
@@ -876,18 +903,26 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_asterisk() {
-        let (request, errs) = Parser::parse("*").unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse("*").unwrap().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
         assert_eq!(errs, vec![]);
 
         // @TODO: is asterisk form only for OPTIONS request?
-        let (request, errs) = Parser::parse("GET *").unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse("GET *").unwrap().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
+
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
         assert_eq!(request.request_line.method, HttpMethod::GET);
         assert_eq!(request.request_line.http_version, None);
         assert_eq!(errs, vec![]);
 
-        let (request, errs) = Parser::parse("CUSTOMMETHOD * HTTP/1.1").unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse("CUSTOMMETHOD * HTTP/1.1").unwrap().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
+
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
         assert_eq!(
             request.request_line.method,
@@ -902,9 +937,13 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_absolute() {
-        let (request, errs) = Parser::parse("https://test.com/api/v1/user?show_all=true&limit=10")
-            .unwrap()
-            .unwrap();
+        let (mut requests, errs) =
+            Parser::parse("https://test.com/api/v1/user?show_all=true&limit=10")
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
 
         // only with relative url
         let expected_target = RequestTarget::Absolute {
@@ -937,20 +976,23 @@ POST https://httpbin.org
         assert_eq!(errs, vec![]);
 
         // method and URL
-        let (request, errs) =
+        let (requests, errs) =
             Parser::parse("GET https://test.com/api/v1/user?show_all=true&limit=10")
                 .unwrap()
                 .unwrap();
+        assert_eq!(requests.len(), 1);
         assert_eq!(request.request_line.target, expected_target);
         assert_eq!(request.request_line.method, HttpMethod::GET);
         assert_eq!(request.request_line.http_version, None);
         assert_eq!(errs, vec![]);
 
         // method and URL and http version
-        let (request, errs) =
+        let (mut requests, errs) =
             Parser::parse("GET https://test.com/api/v1/user?show_all=true&limit=10    HTTP/1.1")
                 .unwrap()
                 .unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
         assert_eq!(request.request_line.method, HttpMethod::GET);
         assert_eq!(
@@ -962,8 +1004,10 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_no_scheme_with_host_no_path() {
-        let (request, errs) = Parser::parse("test.com").unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse("test.com").unwrap().unwrap();
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         match request.request_line.target {
             RequestTarget::Absolute {
                 ref uri,
@@ -981,8 +1025,10 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_no_scheme_with_host_and_path() {
-        let (request, errs) = Parser::parse("test.com/api/v1/test").unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse("test.com/api/v1/test").unwrap().unwrap();
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         match request.request_line.target {
             RequestTarget::Absolute {
                 ref uri,
@@ -1004,9 +1050,11 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_relative() {
-        let (request, errs) = Parser::parse("/api/v1/user?show_all=true&limit=10")
+        let (mut requests, errs) = Parser::parse("/api/v1/user?show_all=true&limit=10")
             .unwrap()
             .unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
 
         // only with relative url
         let expected_target = RequestTarget::RelativeOrigin {
@@ -1035,18 +1083,23 @@ POST https://httpbin.org
         assert_eq!(errs, vec![]);
 
         // method and URL
-        let (request, errs) = Parser::parse("GET /api/v1/user?show_all=true&limit=10")
+        let (mut requests, errs) = Parser::parse("GET /api/v1/user?show_all=true&limit=10")
             .unwrap()
             .unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
         assert_eq!(request.request_line.method, HttpMethod::GET);
         assert_eq!(request.request_line.http_version, None);
         assert_eq!(errs, vec![]);
 
         // method and URL and http version
-        let (request, errs) = Parser::parse("GET /api/v1/user?show_all=true&limit=10    HTTP/1.1")
-            .unwrap()
-            .unwrap();
+        let (mut requests, errs) =
+            Parser::parse("GET /api/v1/user?show_all=true&limit=10    HTTP/1.1")
+                .unwrap()
+                .unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
         assert_eq!(request.request_line.method, HttpMethod::GET);
         assert_eq!(
@@ -1083,8 +1136,10 @@ GET https://test.com:8080
     &value=test
 
         "#####;
-        let (request, errs) = Parser::parse(str).unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse(str).unwrap().unwrap();
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
             .parse()
             .unwrap();
@@ -1109,8 +1164,10 @@ https://test.com:8080
     &value=test
 
         "#####;
-        let (request, errs) = Parser::parse(str).unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse(str).unwrap().unwrap();
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
             .parse()
             .unwrap();
@@ -1135,8 +1192,10 @@ GET https://test.com:8080
     &value=test HTTP/2.1
 
         "#####;
-        let (request, errs) = Parser::parse(str).unwrap().unwrap();
+        let (mut requests, errs) = Parser::parse(str).unwrap().unwrap();
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
         let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
             .parse()
             .unwrap();
@@ -1199,13 +1258,15 @@ Content-Disposition: form-data; name="part1_name"
 ----test_boundary--
 "####;
 
-        let (parsed, errs) = Parser::parse(str)
+        let (mut requests, errs) = Parser::parse(str)
             .expect("Parsing should be successful")
             .expect("There should be a parsed request");
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
 
         assert_eq!(
-            parsed.headers,
+            request.headers,
             vec![Header::new(
                 "Content-Type",
                 "multipart/form-data; boundary=\"--test_boundary\""
@@ -1213,7 +1274,7 @@ Content-Disposition: form-data; name="part1_name"
         );
 
         assert_eq!(
-            parsed.body,
+            request.body,
             model::RequestBody::Multipart {
                 boundary: "--test_boundary".to_string(),
                 parts: vec![Multipart {
@@ -1247,13 +1308,15 @@ more content
 ----test.?)()test--
 "####;
 
-        let (parsed, errs) = Parser::parse(str)
+        let (mut requests, errs) = Parser::parse(str)
             .expect("Parsing should be successful")
             .expect("There should be a parsed request");
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
 
         assert_eq!(
-            parsed.headers,
+            request.headers,
             vec![Header::new(
                 "Content-Type",
                 "multipart/form-data; boundary=\"--test.?)()test\""
@@ -1261,7 +1324,7 @@ more content
         );
 
         assert_eq!(
-            parsed.body,
+            request.body,
             model::RequestBody::Multipart {
                 boundary: "--test.?)()test".to_string(),
                 parts: vec![
@@ -1302,13 +1365,16 @@ Content-Type: application/json
 --WebAppBoundary--
         "#####;
 
-        let (parsed, errs) = Parser::parse(str)
+        let (mut requests, errs) = Parser::parse(str)
             .expect("Parsing should be successful")
             .expect("There should be a parsed request");
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+
+        let request = requests.remove(0);
 
         assert_eq!(
-            parsed.headers,
+            request.headers,
             vec![Header::new(
                 "Content-Type",
                 "multipart/form-data; boundary=WebAppBoundary"
@@ -1316,7 +1382,7 @@ Content-Type: application/json
         );
 
         assert_eq!(
-            parsed.body,
+            request.body,
             model::RequestBody::Multipart {
                 boundary: "WebAppBoundary".to_string(),
                 parts: vec![
@@ -1363,13 +1429,15 @@ H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRA
 --/////////////////////////////--
         "#####;
 
-        let (parsed, errs) = Parser::parse(str)
+        let (mut requests, errs) = Parser::parse(str)
             .expect("Parsing should be successful")
             .expect("There should be a parsed request");
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
 
         assert_eq!(
-            parsed.headers,
+            request.headers,
             vec![
                 Header::new("Host", "localhost:8080"),
                 Header::new(
@@ -1382,7 +1450,7 @@ H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRA
 
         // @TODO check content
         assert_eq!(
-            parsed.body,
+            request.body,
             model::RequestBody::Multipart {
                 boundary: r#"/////////////////////////////"#.to_string(),
                 parts: vec![model::Multipart {
@@ -1418,13 +1486,16 @@ Content-Type: application/json
     "key": "my-dev-value"
 }"#####;
 
-        let (parsed, errs) = Parser::parse(str)
+        let (mut requests, errs) = Parser::parse(str)
             .expect("Parsing should be successful")
             .expect("There should be a parsed request");
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+
+        let request = requests.remove(0);
 
         assert_eq!(
-            parsed.headers,
+            request.headers,
             vec![
                 Header::new("Authorization", r#"Basic dev-user dev-password"#),
                 Header::new("Content-Type", "application/json")
@@ -1432,7 +1503,7 @@ Content-Type: application/json
         );
 
         assert_eq!(
-            parsed.body,
+            request.body,
             model::RequestBody::Text {
                 data: DataSource::Raw(
                     r#"{
@@ -1454,23 +1525,104 @@ Content-Type: application/json
 
         "#####;
 
-        let (parsed, errs) = Parser::parse(str)
+        let (mut requests, errs) = Parser::parse(str)
             .expect("Parsing should be successful")
             .expect("There should be a parsed request");
         assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+
+        let request = requests.remove(0);
 
         assert_eq!(
-            parsed.headers,
+            request.headers,
             vec![Header::new("Content-Type", "application/json")]
         );
 
         // @TODO check content
         assert_eq!(
-            parsed.body,
+            request.body,
             model::RequestBody::Text {
                 data: DataSource::FromFilepath("./input.json".to_string())
             }
         )
+    }
+
+    #[test]
+    pub fn parse_multiple_requests() {
+        let str = r#####"
+POST http://example.com/api/add
+Content-Type: application/json
+
+< ./input.json
+###
+
+GET https://example.com
+###
+GET https://example.com
+
+
+###
+        "#####;
+
+        let (requests, errs) = dbg!(Parser::parse(str))
+            .expect("Parsing should be successful")
+            .expect("There should be a parsed request");
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 3);
+
+        // @TODO check content
+        assert_eq!(
+            requests,
+            vec![
+                model::Request {
+                    name: None,
+                    comments: vec![],
+                    headers: vec![Header {
+                        key: "Content-Type".to_string(),
+                        value: "application/json".to_string()
+                    }],
+                    body: model::RequestBody::Text {
+                        data: DataSource::FromFilepath("./input.json".to_string())
+                    },
+                    request_line: model::RequestLine {
+                        http_version: None,
+                        method: HttpMethod::POST,
+                        target: model::RequestTarget::Absolute {
+                            uri: "http://example.com/api/add".parse::<Uri>().unwrap(),
+                            string: "http://example.com/api/add".to_string()
+                        }
+                    }
+                },
+                model::Request {
+                    name: None,
+                    comments: vec![],
+                    headers: vec![],
+                    body: model::RequestBody::None,
+                    request_line: model::RequestLine {
+                        http_version: None,
+                        method: HttpMethod::GET,
+                        target: model::RequestTarget::Absolute {
+                            uri: "https://example.com".parse::<Uri>().unwrap(),
+                            string: "https://example.com".to_string()
+                        }
+                    }
+                },
+                model::Request {
+                    name: None,
+                    comments: vec![],
+                    headers: vec![],
+                    body: model::RequestBody::None,
+                    request_line: model::RequestLine {
+                        http_version: None,
+                        method: HttpMethod::GET,
+                        target: model::RequestTarget::Absolute {
+                            uri: "https://example.com".parse::<Uri>().unwrap(),
+                            string: "https://example.com".to_string()
+                        }
+                    }
+                }
+            ],
+        );
     }
 
     #[test]

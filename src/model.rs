@@ -1,14 +1,24 @@
 #[derive(PartialEq, Debug, Clone)]
 pub enum ParseErrorType {
-    Unspecified,
+    // General error
+    General,
     NoNameFound,
+    // Http method has to be one of the Http verbs or a custom string
     InvalidHttpMethod,
+    // The target url on the request line is invalid
     InvalidTargetUrl(String),
+    // Http version of the request line is not valid, valid are HTTP/<num>.<num>
     InvalidHttpVersion(String),
+    // Request line requires at least an url
     MissingRequestTargetUrl(String),
+    // Request line should have form <url> | <method> <url> | <method> <url> <version>
     TooManyElementsOnRequestLine(String),
+    // Some multipart is invalid
     InvalidMultipart(String),
+    // A header of a request is invalid
     InvalidHeaderFields(String),
+    // We expect requests to be separated by '###'
+    InvalidRequestBoundary(String),
 }
 
 #[derive(PartialEq, Debug)]
@@ -140,7 +150,7 @@ impl Header {
 
 #[derive(PartialEq, Debug)]
 pub struct Request {
-    pub name: Box<Name>,
+    pub name: Option<String>,
     pub comments: Vec<Comment>,
     pub request_line: RequestLine,
     pub headers: Vec<Header>,
@@ -152,10 +162,6 @@ pub struct Comment {
     pub value: String,
 }
 
-#[derive(PartialEq, Debug)]
-pub struct Name {
-    pub value: String,
-}
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct HttpVersion {
