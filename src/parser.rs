@@ -1,17 +1,17 @@
+use self::model::{Multipart, RequestTarget};
 pub use crate::scanner::Scanner;
-
-use std::str::FromStr;
-
 use crate::{
     model,
-    model::{DataSource, ParseErrorType},
+    model::{CommentKind, DataSource, ParseErrorType, RequestSettings, SettingsEntry},
     parser::model::HttpMethod,
     scanner::{LineIterator, WS_CHARS},
 };
-
 pub use http::Uri;
+use std::str::FromStr;
 
-use self::model::{Multipart, RequestTarget};
+pub const REQUEST_SEPARATOR: &str = "###";
+pub const META_COMMENT_SLASH: &str = "//";
+pub const META_COMMENT_TAG: &str = "#";
 
 pub struct Parser {}
 
@@ -25,15 +25,17 @@ impl Parser {
         }
     }
 
-    pub fn parse_name_comment(scanner: &mut Scanner) -> Result<Option<String>, ParseErrorType> {
+    pub fn parse_meta_name(scanner: &mut Scanner) -> Result<Option<String>, ParseErrorType> {
         scanner.skip_empty_lines();
         scanner.skip_ws();
 
-        let name_regex = "\\s*#\\s*@name\\s*=\\s*(.*)[$\n]";
+        let name_regex = "\\s*@name\\s*=\\s*(.*)";
         if let Ok(Some(captures)) = scanner.match_regex_forward(name_regex) {
+            println!("CAPTURED!");
             let name = captures.first().unwrap().trim().to_string();
             Ok(Some(name))
         } else {
+            println!("NOT CAPTURED");
             Ok(None)
         }
     }
@@ -41,12 +43,62 @@ impl Parser {
     /// match a comment line after '###', '//' or '##' has been stripped from it
     pub fn parse_comment_line(
         scanner: &mut Scanner,
+        kind: CommentKind,
     ) -> Result<Option<model::Comment>, ParseErrorType> {
         scanner.skip_ws();
         match scanner.seek_return(&'\n') {
-            Ok(value) => Ok(Some(model::Comment { value })),
+            Ok(value) => Ok(Some(model::Comment { value, kind })),
             Err(_) => Err(ParseErrorType::General),
         }
+    }
+    /// match a comment line after '###', '//' or '##' has been stripped from it
+    pub fn parse_meta_comment_line(
+        scanner: &mut Scanner,
+    ) -> Option<Result<SettingsEntry, ParseErrorType>> {
+        scanner.skip_ws();
+        /* match scanner.seek_return(&'\n') {
+            Ok(value) => Ok(Some(model::Comment { value })),
+            Err(_) => Err(ParseErrorType::General),
+        } */
+        // comments starting with // can contain @name=<yourname> or @no-log, @no-cookie-jar,
+        // @no-redirect, see RequestSettings
+        let peek_line = scanner.peek_line();
+        if peek_line.is_none() {
+            return None;
+        }
+
+        let mut line_scanner = Scanner::new(&peek_line.unwrap());
+        line_scanner.skip_ws();
+
+        if dbg!(
+            line_scanner.match_str_forward(META_COMMENT_SLASH)
+                || line_scanner.match_str_forward(META_COMMENT_TAG)
+        ) {
+            if let Ok(Some(name)) = dbg!(Parser::parse_meta_name(&mut line_scanner)) {
+                scanner.skip_to_next_line();
+                return Some(Ok(SettingsEntry::NameEntry(name)));
+            }
+            let line = line_scanner.get_line_and_advance();
+            if line.is_none() {
+                return None;
+            }
+
+            let result: Option<Result<SettingsEntry, ParseErrorType>> = match line.unwrap().trim() {
+                "@no-cookie-jar" => Some(Ok(SettingsEntry::NoCookieJar)),
+                "@no-redirect" => Some(Ok(SettingsEntry::NoRedirect)),
+                "@no-log" => Some(Ok(SettingsEntry::NoLog)),
+                // Non matching meta comment lines are taken as regular comments
+                _ => None,
+            };
+
+            if result.is_some() {
+                scanner.skip_to_next_line();
+            }
+
+            return result;
+        }
+
+        None
     }
 
     // @TODO: create a macro that generates a match statement for each enum variant
@@ -208,17 +260,18 @@ You have additional elements: '{}'",
         // apparently '##' is also accepted as a comment within intellij idea as long as there is
         // no '@name' somewhere within the line which would be the case for a name comment '#
         // @name=<yourRequestName>'
-        if scanner.match_str_forward("###") || scanner.match_str_forward("//") {
-            return Parser::parse_comment_line(scanner);
+        if scanner.match_str_forward(dbg!(CommentKind::RequestSeparator.string_repr())) {
+            println!("HEREH");
+            return Parser::parse_comment_line(scanner, CommentKind::RequestSeparator);
         }
 
-        if scanner.match_str_forward("##") {
-            return Parser::parse_comment_line(scanner);
+        if scanner.match_str_forward(CommentKind::DoubleSlash.string_repr()) {
+            return Parser::parse_comment_line(scanner, CommentKind::DoubleSlash);
         }
 
         // @TODO: is single comment allowed if not a name comment line?
-        if scanner.match_str_forward("#") {
-            return Parser::parse_comment_line(scanner);
+        if scanner.match_str_forward(CommentKind::SingleTag.string_repr()) {
+            return Parser::parse_comment_line(scanner, CommentKind::SingleTag);
         }
 
         Ok(None)
@@ -309,7 +362,7 @@ You have additional elements: '{}'",
         }
 
         println!("{}", scanner.debug_string());
-        let peek_line = dbg!(scanner.peek_line());
+        let peek_line = scanner.peek_line();
 
         if peek_line.is_none() {
             return Err(ParseErrorType::InvalidMultipart(
@@ -318,7 +371,7 @@ You have additional elements: '{}'",
             ));
         }
 
-        let peek_line = dbg!(peek_line.unwrap());
+        let peek_line = peek_line.unwrap();
 
         // < means content of multipart is read from file
         // should only have one line to parse
@@ -546,7 +599,7 @@ You have additional elements: '{}'",
                 }
                 let peek_line = peek_line.unwrap();
                 // new request starts
-                if peek_line.starts_with("###") {
+                if peek_line.starts_with(REQUEST_SEPARATOR) {
                     break;
                 }
                 scanner.skip_to_next_line();
@@ -575,14 +628,26 @@ You have additional elements: '{}'",
         let mut comments = Vec::new();
         let mut name: Option<String> = None;
         let mut parse_errs: Vec<ParseErrorType> = Vec::new();
+        let mut request_settings = RequestSettings::default();
 
         scanner.skip_empty_lines();
 
         loop {
-            if let Ok(Some(name_node)) = Parser::parse_name_comment(scanner) {
-                name = Some(name_node);
+            println!("POS: {:?}", scanner.debug_string());
+            match dbg!(Parser::parse_meta_comment_line(scanner)) {
+                Some(Ok(SettingsEntry::NameEntry(entry_name))) => {
+                    name = Some(entry_name);
+                }
+                Some(Ok(entry)) => {
+                    request_settings.set_entry(&entry);
+                }
+                Some(Err(parse_error)) => {
+                    parse_errs.push(parse_error);
+                }
+                None => (), // ignore
             }
-            match Parser::parse_comment(scanner) {
+
+            match dbg!(Parser::parse_comment(scanner)) {
                 Ok(Some(comment_node)) => {
                     comments.push(comment_node);
                 }
@@ -593,6 +658,18 @@ You have additional elements: '{}'",
                     parse_errs.push(parse_error);
                     break;
                 }
+            }
+        }
+
+        // if no name has been found with meta tag @name=, set name from a comment starting with
+        // '###' if there is any
+        if name.is_none() {
+            if let Some(position) = comments
+                .iter()
+                .position(|c| c.kind == CommentKind::RequestSeparator)
+            {
+                let comment = comments.remove(position);
+                name = Some(comment.value.trim().to_string());
             }
         }
 
@@ -610,7 +687,7 @@ You have additional elements: '{}'",
         // end of request reached?
         {
             let peek_line = scanner.peek_line();
-            if peek_line.is_some() && peek_line.unwrap().trim().starts_with("###") {
+            if peek_line.is_some() && peek_line.unwrap().trim().starts_with(REQUEST_SEPARATOR) {
                 let request_node = model::Request {
                     name,
                     comments,
@@ -618,6 +695,7 @@ You have additional elements: '{}'",
                     // no headers nor body parsed
                     headers: vec![],
                     body: model::RequestBody::None,
+                    settings: RequestSettings::default(),
                 };
                 return Ok(Some((request_node, parse_errs)));
             }
@@ -643,6 +721,7 @@ You have additional elements: '{}'",
             request_line,
             headers,
             body,
+            settings: RequestSettings::default(),
         };
 
         // if no name set we use the first comment as name @TODO: only ### comment is accepted?
@@ -678,7 +757,7 @@ You have additional elements: '{}'",
             if scanner.is_done() {
                 break;
             }
-            if !scanner.match_str_forward("###") {
+            if !scanner.match_str_forward(REQUEST_SEPARATOR) {
                 let msg = format!(
                     "Expected request to be terminated with '###' found {}",
                     scanner.peek_line().map_or("".to_string(), |l| l)
@@ -693,7 +772,7 @@ You have additional elements: '{}'",
 #[cfg(test)]
 mod tests {
     use crate::{
-        model::DispositionField,
+        model::{Comment, DispositionField},
         parser::model::{Header, HttpVersion},
     };
 
@@ -718,6 +797,7 @@ https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
+            settings: RequestSettings::default(),
         }];
 
         match parsed {
@@ -748,6 +828,7 @@ https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
+            settings: RequestSettings::default(),
         }];
 
         match parsed {
@@ -775,10 +856,18 @@ GET https://test.com
         assert!(errs.len() == 0);
         assert_eq!(request.name, Some("actual request name".to_string()));
         assert_eq!(request.comments.len(), 2);
-        assert_eq!(request.comments[0].value, "Just a comment");
         assert_eq!(
-            request.comments[1].value,
-            "invalid comment but still parsed"
+            request.comments,
+            vec![
+                Comment {
+                    value: "Just a comment".to_string(),
+                    kind: CommentKind::RequestSeparator
+                },
+                Comment {
+                    value: "# invalid comment but still parsed".to_string(),
+                    kind: CommentKind::SingleTag
+                }
+            ]
         );
     }
 
@@ -801,6 +890,7 @@ CUSTOMVERB https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
+            settings: RequestSettings::default(),
         }];
 
         match parsed {
@@ -831,6 +921,7 @@ POST https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
+            settings: RequestSettings::default(),
         }];
 
         match parsed {
@@ -861,6 +952,7 @@ POST https://httpbin.org
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
+            settings: RequestSettings::default(),
         }];
 
         // whitespace before or after name should be removed
@@ -899,6 +991,16 @@ POST https://httpbin.org
             }
             _ => panic!("no valid parse result {:?}", parsed),
         }
+    }
+
+    #[test]
+    pub fn parse_meta_name_line() {
+        let str = "@name  =  actual request name";
+        let mut scanner = Scanner::new(str);
+        let name = Parser::parse_meta_name(&mut scanner)
+            .expect("can parse name line without error")
+            .expect("parse returns something");
+        assert_eq!(name, "actual request name".to_string());
     }
 
     #[test]
@@ -1591,7 +1693,8 @@ GET https://example.com
                             uri: "http://example.com/api/add".parse::<Uri>().unwrap(),
                             string: "http://example.com/api/add".to_string()
                         }
-                    }
+                    },
+                    settings: RequestSettings::default()
                 },
                 model::Request {
                     name: None,
@@ -1605,7 +1708,8 @@ GET https://example.com
                             uri: "https://example.com".parse::<Uri>().unwrap(),
                             string: "https://example.com".to_string()
                         }
-                    }
+                    },
+                    settings: RequestSettings::default()
                 },
                 model::Request {
                     name: None,
@@ -1619,7 +1723,8 @@ GET https://example.com
                             uri: "https://example.com".parse::<Uri>().unwrap(),
                             string: "https://example.com".to_string()
                         }
-                    }
+                    },
+                    settings: RequestSettings::default()
                 }
             ],
         );

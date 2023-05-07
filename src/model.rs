@@ -19,6 +19,9 @@ pub enum ParseErrorType {
     InvalidHeaderFields(String),
     // We expect requests to be separated by '###'
     InvalidRequestBoundary(String),
+
+    // only certain characters tart a comment such as '//', '#', '###'
+    CommentTypeNotRecognized(String),
 }
 
 #[derive(PartialEq, Debug)]
@@ -42,6 +45,43 @@ pub enum RequestTarget {
     Absolute { uri: http::Uri, string: String },
     Asterisk,
     InvalidTarget(String),
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub enum SettingsEntry {
+    NoRedirect,
+    NoLog,
+    NoCookieJar,
+    NameEntry(String),
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub struct RequestSettings {
+    no_redirect: Option<bool>,
+    no_log: Option<bool>,
+    no_cookie_jar: Option<bool>,
+}
+
+impl Default for RequestSettings {
+    fn default() -> Self {
+        RequestSettings {
+            no_redirect: Some(false),
+            no_log: Some(false),
+            no_cookie_jar: Some(false),
+        }
+    }
+}
+
+impl RequestSettings {
+    pub fn set_entry(&mut self, entry: &SettingsEntry) {
+        match entry {
+            SettingsEntry::NoLog => self.no_log = Some(true),
+            SettingsEntry::NoRedirect => self.no_redirect = Some(true),
+            SettingsEntry::NoCookieJar => self.no_cookie_jar = Some(true),
+            // do nothing with name, is stored directly on the request
+            SettingsEntry::NameEntry(_name) => (),
+        }
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -155,13 +195,50 @@ pub struct Request {
     pub request_line: RequestLine,
     pub headers: Vec<Header>,
     pub body: RequestBody,
+    pub settings: RequestSettings,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub enum CommentKind {
+    // //
+    DoubleSlash,
+    // ###
+    RequestSeparator,
+    // #
+    SingleTag,
+}
+
+impl CommentKind {
+    pub fn string_repr(&self) -> &str {
+        match self {
+            Self::DoubleSlash => "//",
+            Self::RequestSeparator => "###",
+            Self::SingleTag => "#"
+        }
+    }
+}
+
+
+impl std::str::FromStr for CommentKind {
+    type Err = ParseErrorType;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "//" => Ok(Self::DoubleSlash),
+            "###" => Ok(Self::RequestSeparator),
+            "#" => Ok(Self::SingleTag),
+            _ => {
+                let msg = format!("Invalid start characters for comment: {}", s);
+                return Err(ParseErrorType::CommentTypeNotRecognized(msg));
+            }
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
 pub struct Comment {
     pub value: String,
+    pub kind: CommentKind,
 }
-
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct HttpVersion {

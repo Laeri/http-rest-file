@@ -291,11 +291,11 @@ impl Scanner {
         // string symbol ^
         let mut regex_str: String = user_regex_str.to_owned();
         if !regex_str.starts_with('^') {
-            regex_str = format!("^{}", user_regex_str);
+            regex_str = dbg!(format!("^{}", user_regex_str));
         }
         let regex = regex::bytes::Regex::new(&regex_str)?;
 
-        let string_tmp = self.characters[self.cursor..].iter().collect::<String>();
+        let string_tmp = dbg!(self.characters[self.cursor..].iter().collect::<String>());
         let bytes = string_tmp.as_bytes();
         return match regex.captures(bytes) {
             Some(comment_captures) => {
