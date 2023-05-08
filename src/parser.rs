@@ -3,7 +3,8 @@ pub use crate::scanner::Scanner;
 use crate::{
     model,
     model::{
-        CommentKind, DataSource, FileParseResult, ParseErrorType, RequestSettings, SettingsEntry,
+        CommentKind, DataSource, FileParseResult, ParseErrorType, RequestSettings, ResponseHandler,
+        SettingsEntry,
     },
     parser::model::HttpMethod,
     scanner::{LineIterator, WS_CHARS},
@@ -56,7 +57,7 @@ impl Parser {
         scanner: &mut Scanner,
     ) -> Option<Result<SettingsEntry, ParseErrorType>> {
         scanner.skip_ws();
-                
+
         let peek_line = scanner.peek_line();
 
         #[allow(clippy::question_mark)]
@@ -597,6 +598,11 @@ You have additional elements: '{}'",
                 if peek_line.starts_with(REQUEST_SEPARATOR) {
                     break;
                 }
+
+                // response handler
+                if peek_line.starts_with(">") {
+                    break;
+                }
                 scanner.skip_to_next_line();
             }
             let end_pos = scanner.get_pos();
@@ -656,6 +662,59 @@ You have additional elements: '{}'",
         }
         scanner.skip_to_next_line();
         Ok(Some(lines.join("\n")))
+    }
+
+    pub fn parse_response_handler(
+        scanner: &mut Scanner,
+    ) -> Result<Option<model::ResponseHandler>, ParseErrorType> {
+        scanner.skip_ws();
+        if !scanner.match_str_forward(">") {
+            return Ok(None);
+        }
+        scanner.skip_ws();
+        scanner.skip_empty_lines();
+        if scanner.match_str_forward("{%") {
+            let mut lines: Vec<String> = Vec::new();
+            let mut found = false;
+            loop {
+                if let Ok(Some(matches)) = scanner.match_regex_forward("(.*)%}") {
+                    if matches.len() == 1 {
+                        found = true;
+                        lines.push(matches[0].to_string());
+                        break;
+                    } else {
+                        let msg = "Expected closing %} for response handler, response handler script is malformed.";
+                        return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
+                    }
+                } else {
+                    let line = scanner.get_line_and_advance();
+                    if line.is_none() {
+                        break;
+                    }
+                    lines.push(line.unwrap());
+                }
+            }
+            if !found {
+                let msg = "Expected a closing %} for response script, none was found";
+                return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
+            }
+
+            scanner.skip_to_next_line();
+
+            return Ok(Some(ResponseHandler::Script(lines.join("\n"))));
+        } else {
+            // then a path
+            if let Ok(Some(matches)) = scanner.match_regex_forward("([^\\s])+") {
+                if matches.is_empty() {
+                    let msg = "Invalid response handler, expect either a path to a handlerscript after '>' or a handler script {% %} but neither has been found.";
+                    return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
+                }
+                return Ok(Some(ResponseHandler::FromFilepath(matches[0].to_string())));
+            } else {
+                let msg = "Invalid response handler, expect either a path to a handlerscript after '>' or a handler script {% %} but neither has been found.";
+                return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
+            }
+        }
     }
 
     pub fn parse_request(
@@ -742,6 +801,7 @@ You have additional elements: '{}'",
                     body: model::RequestBody::None,
                     settings: request_settings,
                     pre_request_script,
+                    response_handler: None,
                 };
                 return Ok(Some((request_node, parse_errs)));
             }
@@ -761,6 +821,11 @@ You have additional elements: '{}'",
         let (body, mut body_parse_errs) = Parser::parse_body(scanner, &headers);
         parse_errs.append(&mut body_parse_errs);
 
+        let mut response_handler: Option<ResponseHandler> = None;
+        if let Ok(Some(result)) = Parser::parse_response_handler(scanner) {
+            response_handler = Some(result);
+        };
+
         let mut request_node = model::Request {
             name,
             comments,
@@ -769,6 +834,7 @@ You have additional elements: '{}'",
             body,
             settings: request_settings,
             pre_request_script,
+            response_handler,
         };
 
         // if no name set we use the first comment as name @TODO: only ### comment is accepted?
@@ -844,6 +910,7 @@ https://httpbin.org
             body: model::RequestBody::None,
             settings: RequestSettings::default(),
             pre_request_script: None,
+            response_handler: None,
         }];
 
         match parsed {
@@ -876,6 +943,7 @@ https://httpbin.org
             body: model::RequestBody::None,
             settings: RequestSettings::default(),
             pre_request_script: None,
+            response_handler: None,
         }];
 
         match parsed {
@@ -939,6 +1007,7 @@ CUSTOMVERB https://httpbin.org
             body: model::RequestBody::None,
             settings: RequestSettings::default(),
             pre_request_script: None,
+            response_handler: None,
         }];
 
         match parsed {
@@ -971,6 +1040,7 @@ POST https://httpbin.org
             body: model::RequestBody::None,
             settings: RequestSettings::default(),
             pre_request_script: None,
+            response_handler: None,
         }];
 
         match parsed {
@@ -1003,6 +1073,7 @@ POST https://httpbin.org
             body: model::RequestBody::None,
             settings: RequestSettings::default(),
             pre_request_script: None,
+            response_handler: None,
         }];
 
         // whitespace before or after name should be removed
@@ -1749,7 +1820,8 @@ GET https://example.com
                         }
                     },
                     settings: RequestSettings::default(),
-                    pre_request_script: None
+                    pre_request_script: None,
+                    response_handler: None,
                 },
                 model::Request {
                     name: None,
@@ -1766,6 +1838,7 @@ GET https://example.com
                     },
                     settings: RequestSettings::default(),
                     pre_request_script: None,
+                    response_handler: None,
                 },
                 model::Request {
                     name: None,
@@ -1781,7 +1854,8 @@ GET https://example.com
                         }
                     },
                     settings: RequestSettings::default(),
-                    pre_request_script: None
+                    pre_request_script: None,
+                    response_handler: None
                 }
             ],
         );
@@ -1825,6 +1899,7 @@ GET https://httpbin.org
                 },
                 body: model::RequestBody::None,
                 pre_request_script: None,
+                response_handler: None
             }
         );
     }
@@ -1863,6 +1938,7 @@ GET https://httpbin.org
                 pre_request_script: Some(
                     r#"     request.variables.set("firstname", "John") "#.to_string()
                 ),
+                response_handler: None
             }
         );
     }
@@ -1924,9 +2000,102 @@ GET https://httpbin.org
                 },
                 body: model::RequestBody::None,
                 pre_request_script: Some(pre_request_script.to_string()),
+                response_handler: None
             }
         );
     }
+
+    #[test]
+    pub fn parse_handler_script_single_line() {
+        let str = r#####"
+### Request
+// @no-log
+GET https://httpbin.org
+
+> {% client.global.set("my_cookie", response.headers.valuesOf("Set-Cookie")[0]); %} 
+"#####;
+
+        let response_handler_script = r#####" client.global.set("my_cookie", response.headers.valuesOf("Set-Cookie")[0]); "#####;
+
+        let FileParseResult { requests, errs } = Parser::parse(str)
+            .expect("should parse result without error")
+            .expect("should return request");
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("Request".to_string()),
+                headers: vec![],
+                comments: vec![],
+                settings: RequestSettings {
+                    no_redirect: Some(false),
+                    no_log: Some(true),
+                    no_cookie_jar: Some(false),
+                    use_os_credentials: Some(false),
+                },
+                request_line: RequestLine {
+                    method: HttpMethod::GET,
+                    target: RequestTarget::from("https://httpbin.org"),
+                    http_version: None
+                },
+                body: model::RequestBody::None,
+                pre_request_script: None,
+                response_handler: Some(ResponseHandler::Script(
+                    response_handler_script.to_string()
+                ))
+            }
+        );
+    }
+    #[test]
+    pub fn parse_handler_script_multiple_lines() {
+        let str = r#####"
+### Request
+// @no-log
+GET https://httpbin.org
+
+> {%
+    client.global.set("my_cookie", response.headers.valuesOf("Set-Cookie")[0]);
+    client.global.set("my_cookie_2", response.headers.valuesOf("Set-Cookie")[0]);
+%} 
+"#####;
+
+        let response_handler_script = r#####"
+    client.global.set("my_cookie", response.headers.valuesOf("Set-Cookie")[0]);
+    client.global.set("my_cookie_2", response.headers.valuesOf("Set-Cookie")[0]);
+"#####;
+
+        let FileParseResult { requests, errs } = Parser::parse(str)
+            .expect("should parse result without error")
+            .expect("should return request");
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("Request".to_string()),
+                headers: vec![],
+                comments: vec![],
+                settings: RequestSettings {
+                    no_redirect: Some(false),
+                    no_log: Some(true),
+                    no_cookie_jar: Some(false),
+                    use_os_credentials: Some(false),
+                },
+                request_line: RequestLine {
+                    method: HttpMethod::GET,
+                    target: RequestTarget::from("https://httpbin.org"),
+                    http_version: None
+                },
+                body: model::RequestBody::None,
+                pre_request_script: None,
+                response_handler: Some(ResponseHandler::Script(
+                    response_handler_script.to_string()
+                ))
+            }
+        );
+    }
+
     #[test]
     pub fn has_valid_extension() {
         // ok

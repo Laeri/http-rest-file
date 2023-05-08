@@ -26,6 +26,9 @@ pub enum ParseErrorType {
 
     // pre request scripts < {% %}
     InvalidPreRequestScript(String),
+
+    // response handler '> <path>' or '> {% <your_script> %}' is not valid 
+    InvalidResponseHandler(String)
 }
 
 #[derive(PartialEq, Debug)]
@@ -209,6 +212,12 @@ pub struct HttpRestFile {
     extension: HttpRestFileExtension,
 }
 
+#[derive(PartialEq, Debug, Clone)]
+pub enum ResponseHandler {
+    FromFilepath(String),
+    Script(String)
+}
+
 #[derive(PartialEq, Debug)]
 pub struct Request {
     pub name: Option<String>,
@@ -217,7 +226,8 @@ pub struct Request {
     pub headers: Vec<Header>,
     pub body: RequestBody,
     pub settings: RequestSettings,
-    pub pre_request_script: Option<String>
+    pub pre_request_script: Option<String>,
+    pub response_handler: Option<ResponseHandler>
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -347,3 +357,5 @@ pub struct FileParseResult {
     pub requests: Vec<Request>,
     pub errs: Vec<ParseErrorType>,
 }
+
+

@@ -1,8 +1,10 @@
 mod parser;
 mod scanner;
 mod model;
+mod serializer;
 pub use parser::Parser;
 pub use parser::Scanner;
+pub use serializer::Serializer;
 
 #[cfg(test)]
 mod tests {
