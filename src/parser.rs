@@ -3,8 +3,8 @@ pub use crate::scanner::Scanner;
 use crate::{
     model,
     model::{
-        CommentKind, DataSource, FileParseResult, ParseErrorType, RequestSettings, ResponseHandler,
-        SettingsEntry,
+        CommentKind, DataSource, FileParseResult, ParseErrorType, Redirect, RequestSettings,
+        ResponseHandler, SettingsEntry,
     },
     parser::model::HttpMethod,
     scanner::{LineIterator, WS_CHARS},
@@ -603,6 +603,11 @@ You have additional elements: '{}'",
                 if peek_line.starts_with(">") {
                     break;
                 }
+
+                // output handler also ends body
+                if peek_line.starts_with(">>") {
+                    break;
+                }
                 scanner.skip_to_next_line();
             }
             let end_pos = scanner.get_pos();
@@ -717,6 +722,33 @@ You have additional elements: '{}'",
         }
     }
 
+    pub fn parse_redirect(scanner: &mut Scanner) -> Result<Option<Redirect>, ParseErrorType> {
+        if !scanner.match_str_forward(">>") {
+            return Ok(None);
+        }
+
+        let mut rewrite = false;
+        if scanner.match_str_forward("!") {
+            rewrite = true;
+        }
+
+        let path = scanner.get_line_and_advance();
+
+        if path.is_none() {
+            return Err(ParseErrorType::RedirectMissingPath(
+                "Missing path to file after redirect".to_string(),
+            ));
+        }
+
+        let path = path.unwrap();
+
+        if rewrite {
+            return Ok(Some(Redirect::RewriteFile(path)));
+        } else {
+            return Ok(Some(Redirect::NewFileIfExists(path)));
+        }
+    }
+
     pub fn parse_request(
         scanner: &mut Scanner,
     ) -> Result<Option<(model::Request, Vec<ParseErrorType>)>, Vec<ParseErrorType>> {
@@ -802,6 +834,7 @@ You have additional elements: '{}'",
                     settings: request_settings,
                     pre_request_script,
                     response_handler: None,
+                    redirect: None,
                 };
                 return Ok(Some((request_node, parse_errs)));
             }
@@ -825,6 +858,13 @@ You have additional elements: '{}'",
         if let Ok(Some(result)) = Parser::parse_response_handler(scanner) {
             response_handler = Some(result);
         };
+        scanner.skip_empty_lines();
+
+        let mut redirect: Option<Redirect> = None;
+        if let Ok(Some(result)) = Parser::parse_redirect(scanner) {
+            redirect = Some(result);
+        }
+        scanner.skip_empty_lines();
 
         let mut request_node = model::Request {
             name,
@@ -835,6 +875,7 @@ You have additional elements: '{}'",
             settings: request_settings,
             pre_request_script,
             response_handler,
+            redirect,
         };
 
         // if no name set we use the first comment as name @TODO: only ### comment is accepted?
@@ -911,6 +952,7 @@ https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
+            redirect: None,
         }];
 
         match parsed {
@@ -944,6 +986,7 @@ https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
+            redirect: None,
         }];
 
         match parsed {
@@ -1008,6 +1051,7 @@ CUSTOMVERB https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
+            redirect: None,
         }];
 
         match parsed {
@@ -1041,6 +1085,7 @@ POST https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
+            redirect: None,
         }];
 
         match parsed {
@@ -1074,6 +1119,7 @@ POST https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
+            redirect: None,
         }];
 
         // whitespace before or after name should be removed
@@ -1822,6 +1868,7 @@ GET https://example.com
                     settings: RequestSettings::default(),
                     pre_request_script: None,
                     response_handler: None,
+                    redirect: None,
                 },
                 model::Request {
                     name: None,
@@ -1839,6 +1886,7 @@ GET https://example.com
                     settings: RequestSettings::default(),
                     pre_request_script: None,
                     response_handler: None,
+                    redirect: None,
                 },
                 model::Request {
                     name: None,
@@ -1855,7 +1903,8 @@ GET https://example.com
                     },
                     settings: RequestSettings::default(),
                     pre_request_script: None,
-                    response_handler: None
+                    response_handler: None,
+                    redirect: None
                 }
             ],
         );
@@ -1899,7 +1948,8 @@ GET https://httpbin.org
                 },
                 body: model::RequestBody::None,
                 pre_request_script: None,
-                response_handler: None
+                response_handler: None,
+                redirect: None
             }
         );
     }
@@ -1938,7 +1988,8 @@ GET https://httpbin.org
                 pre_request_script: Some(
                     r#"     request.variables.set("firstname", "John") "#.to_string()
                 ),
-                response_handler: None
+                response_handler: None,
+                redirect: None
             }
         );
     }
@@ -2000,7 +2051,8 @@ GET https://httpbin.org
                 },
                 body: model::RequestBody::None,
                 pre_request_script: Some(pre_request_script.to_string()),
-                response_handler: None
+                response_handler: None,
+                redirect: None,
             }
         );
     }
@@ -2043,7 +2095,8 @@ GET https://httpbin.org
                 pre_request_script: None,
                 response_handler: Some(ResponseHandler::Script(
                     response_handler_script.to_string()
-                ))
+                )),
+                redirect: None
             }
         );
     }
@@ -2091,7 +2144,8 @@ GET https://httpbin.org
                 pre_request_script: None,
                 response_handler: Some(ResponseHandler::Script(
                     response_handler_script.to_string()
-                ))
+                )),
+                redirect: None
             }
         );
     }

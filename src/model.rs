@@ -28,7 +28,10 @@ pub enum ParseErrorType {
     InvalidPreRequestScript(String),
 
     // response handler '> <path>' or '> {% <your_script> %}' is not valid 
-    InvalidResponseHandler(String)
+    InvalidResponseHandler(String),
+
+    // redirect to file requires a path
+    RedirectMissingPath(String),
 }
 
 #[derive(PartialEq, Debug)]
@@ -218,6 +221,12 @@ pub enum ResponseHandler {
     Script(String)
 }
 
+#[derive(PartialEq, Debug, Clone)]
+pub enum Redirect {
+    NewFileIfExists(String),
+    RewriteFile(String)
+}
+
 #[derive(PartialEq, Debug)]
 pub struct Request {
     pub name: Option<String>,
@@ -227,7 +236,8 @@ pub struct Request {
     pub body: RequestBody,
     pub settings: RequestSettings,
     pub pre_request_script: Option<String>,
-    pub response_handler: Option<ResponseHandler>
+    pub response_handler: Option<ResponseHandler>,
+    pub redirect: Option<Redirect>
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -357,5 +367,7 @@ pub struct FileParseResult {
     pub requests: Vec<Request>,
     pub errs: Vec<ParseErrorType>,
 }
+
+
 
 
