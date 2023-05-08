@@ -1,3 +1,4 @@
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum ParseErrorType {
     // General error
@@ -22,6 +23,9 @@ pub enum ParseErrorType {
 
     // only certain characters tart a comment such as '//', '#', '###'
     CommentTypeNotRecognized(String),
+
+    // pre request scripts < {% %}
+    InvalidPreRequestScript(String),
 }
 
 #[derive(PartialEq, Debug)]
@@ -52,14 +56,16 @@ pub enum SettingsEntry {
     NoRedirect,
     NoLog,
     NoCookieJar,
+    UseOsCredentials,
     NameEntry(String),
 }
 
 #[derive(PartialEq, Debug, Clone)]
 pub struct RequestSettings {
-    no_redirect: Option<bool>,
-    no_log: Option<bool>,
-    no_cookie_jar: Option<bool>,
+    pub no_redirect: Option<bool>,
+    pub no_log: Option<bool>,
+    pub no_cookie_jar: Option<bool>,
+    pub use_os_credentials: Option<bool>,
 }
 
 impl Default for RequestSettings {
@@ -68,6 +74,7 @@ impl Default for RequestSettings {
             no_redirect: Some(false),
             no_log: Some(false),
             no_cookie_jar: Some(false),
+            use_os_credentials: Some(false),
         }
     }
 }
@@ -78,6 +85,7 @@ impl RequestSettings {
             SettingsEntry::NoLog => self.no_log = Some(true),
             SettingsEntry::NoRedirect => self.no_redirect = Some(true),
             SettingsEntry::NoCookieJar => self.no_cookie_jar = Some(true),
+            SettingsEntry::UseOsCredentials => self.use_os_credentials = Some(true),
             // do nothing with name, is stored directly on the request
             SettingsEntry::NameEntry(_name) => (),
         }
@@ -189,6 +197,19 @@ impl Header {
 }
 
 #[derive(PartialEq, Debug)]
+pub enum HttpRestFileExtension {
+    Http,
+    Rest,
+}
+
+#[derive(PartialEq, Debug)]
+pub struct HttpRestFile {
+    requests: Vec<Request>,
+    path: Box<std::path::Path>,
+    extension: HttpRestFileExtension,
+}
+
+#[derive(PartialEq, Debug)]
 pub struct Request {
     pub name: Option<String>,
     pub comments: Vec<Comment>,
@@ -196,6 +217,7 @@ pub struct Request {
     pub headers: Vec<Header>,
     pub body: RequestBody,
     pub settings: RequestSettings,
+    pub pre_request_script: Option<String>
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -213,11 +235,10 @@ impl CommentKind {
         match self {
             Self::DoubleSlash => "//",
             Self::RequestSeparator => "###",
-            Self::SingleTag => "#"
+            Self::SingleTag => "#",
         }
     }
 }
-
 
 impl std::str::FromStr for CommentKind {
     type Err = ParseErrorType;
@@ -228,7 +249,7 @@ impl std::str::FromStr for CommentKind {
             "#" => Ok(Self::SingleTag),
             _ => {
                 let msg = format!("Invalid start characters for comment: {}", s);
-                return Err(ParseErrorType::CommentTypeNotRecognized(msg));
+                Err(ParseErrorType::CommentTypeNotRecognized(msg))
             }
         }
     }
@@ -238,6 +259,16 @@ impl std::str::FromStr for CommentKind {
 pub struct Comment {
     pub value: String,
     pub kind: CommentKind,
+}
+
+impl ToString for Comment {
+    fn to_string(&self) -> String {
+       match self.kind {
+            CommentKind::SingleTag => format!("# {}", self.value),
+            CommentKind::DoubleSlash => format!("// {}", self.value),
+            CommentKind::RequestSeparator => format!("### {}", self.value)
+        } 
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -309,4 +340,10 @@ impl Request {
             .collect::<Vec<String>>()
             .join("\n")
     }
+}
+
+#[derive(PartialEq, Debug)]
+pub struct FileParseResult {
+    pub requests: Vec<Request>,
+    pub errs: Vec<ParseErrorType>,
 }

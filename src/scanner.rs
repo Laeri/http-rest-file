@@ -131,7 +131,6 @@ impl Scanner {
         if end >= self.cursor {
             end = self.cursor;
         }
-        println!("Start: {}, End: {}", start, end);
         self.characters[start..end].iter().collect::<String>()
     }
 
@@ -291,11 +290,11 @@ impl Scanner {
         // string symbol ^
         let mut regex_str: String = user_regex_str.to_owned();
         if !regex_str.starts_with('^') {
-            regex_str = dbg!(format!("^{}", user_regex_str));
+            regex_str = format!("^{}", user_regex_str);
         }
         let regex = regex::bytes::Regex::new(&regex_str)?;
 
-        let string_tmp = dbg!(self.characters[self.cursor..].iter().collect::<String>());
+        let string_tmp = self.characters[self.cursor..].iter().collect::<String>();
         let bytes = string_tmp.as_bytes();
         return match regex.captures(bytes) {
             Some(comment_captures) => {
@@ -444,8 +443,7 @@ impl Scanner {
 #[cfg(debug_assertions)]
 impl Scanner {
     pub fn debug_string(&self) -> String {
-        println!("DEBUG PRINT");
-        let before: String = dbg!(self.characters[..self.cursor].iter().collect());
+        let before: String = self.characters[..self.cursor].iter().collect();
 
         let current: String = self
             .characters
