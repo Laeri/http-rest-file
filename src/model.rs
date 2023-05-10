@@ -1,36 +1,83 @@
 #[derive(PartialEq, Debug, Clone)]
-pub enum ParseErrorType {
+pub enum ParseErrorKind {
     // General error
     General,
-    NoNameFound,
-    // Http method has to be one of the Http verbs or a custom string
-    InvalidHttpMethod,
     // The target url on the request line is invalid
-    InvalidTargetUrl(String),
+    InvalidTargetUrl,
     // Http version of the request line is not valid, valid are HTTP/<num>.<num>
-    InvalidHttpVersion(String),
+    InvalidHttpVersion,
     // Request line requires at least an url
-    MissingRequestTargetUrl(String),
+    MissingRequestTargetUrl,
     // Request line should have form <url> | <method> <url> | <method> <url> <version>
-    TooManyElementsOnRequestLine(String),
+    TooManyElementsOnRequestLine,
     // Some multipart is invalid
-    InvalidMultipart(String),
+    InvalidMultipart,
     // A header of a request is invalid
-    InvalidHeaderFields(String),
+    InvalidHeaderFields,
     // We expect requests to be separated by '###'
-    InvalidRequestBoundary(String),
-
+    InvalidRequestBoundary,
     // only certain characters tart a comment such as '//', '#', '###'
-    CommentTypeNotRecognized(String),
-
+    CommentTypeNotRecognized,
     // pre request scripts < {% %}
-    InvalidPreRequestScript(String),
-
+    InvalidPreRequestScript,
     // response handler '> <path>' or '> {% <your_script> %}' is not valid
-    InvalidResponseHandler(String),
-
+    InvalidResponseHandler,
     // redirect to file requires a path
-    RedirectMissingPath(String),
+    RedirectMissingPath,
+    // if read file errors
+    FileReadError,
+    // file does not contain any request
+    NoRequestFoundInFile,
+    // path to read file from is not valid
+    InvalidFilePath,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+pub struct ParseError {
+    pub kind: ParseErrorKind,
+    pub message: String,
+    pub start_pos: Option<usize>,
+    pub end_pos: Option<usize>,
+}
+
+impl Default for ParseError {
+    fn default() -> Self {
+        ParseError {
+            kind: ParseErrorKind::General,
+            message: String::new(),
+            start_pos: None,
+            end_pos: None,
+        }
+    }
+}
+impl ParseError {
+    pub fn new<S: Into<String>>(kind: ParseErrorKind, msg: S) -> Self {
+        ParseError {
+            kind,
+            message: msg.into(),
+            start_pos: None,
+            end_pos: None,
+        }
+    }
+
+    pub fn new_with_position<S, T, U>(
+        kind: ParseErrorKind,
+        msg: S,
+        start_pos: T,
+        end_pos: Option<U>,
+    ) -> ParseError
+    where
+        S: Into<String>,
+        T: Into<usize>,
+        U: Into<usize>,
+    {
+        ParseError {
+            kind,
+            message: msg.into(),
+            start_pos: Some(start_pos.into()),
+            end_pos: end_pos.map(|p| p.into()),
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -60,7 +107,7 @@ impl ToString for HttpMethod {
             HttpMethod::TRACE => "TRACE",
             HttpMethod::OPTIONS => "OPTIONS",
             HttpMethod::CONNECT => "CONNECT",
-            HttpMethod::CUSTOM(string) => &string,
+            HttpMethod::CUSTOM(string) => string,
         };
         result.to_string()
     }
@@ -114,6 +161,8 @@ impl RequestSettings {
         }
     }
 
+    #[allow(dead_code)]
+    // lsp plugin does not recognize that this method is used
     pub fn serialized(&self) -> String {
         let mut result = String::new();
         if let Some(true) = self.no_redirect {
@@ -175,6 +224,8 @@ pub enum RequestBody {
 }
 
 impl RequestBody {
+    #[allow(dead_code)]
+    // error in lsp plugin, does not recognize this method is used
     pub fn is_present(&self) -> bool {
         if let RequestBody::None = self {
             return false;
@@ -221,7 +272,7 @@ impl ToString for RequestBody {
                     multipart_res.push('\n');
                 }
                 multipart_res.push_str(&format!("--{}--", boundary));
-                return multipart_res;
+                multipart_res
             }
             RequestBody::Text { data } => data.to_string(),
         }
@@ -229,7 +280,7 @@ impl ToString for RequestBody {
 }
 
 impl RequestTarget {
-    pub fn parse(value: &str) -> Result<RequestTarget, ParseErrorType> {
+    pub fn parse(value: &str) -> Result<RequestTarget, ParseError> {
         if value == "*" {
             return Ok(RequestTarget::Asterisk);
         }
@@ -259,27 +310,23 @@ impl RequestTarget {
                         uri,
                         string: value.to_string(),
                     }),
-                    _ => Err(ParseErrorType::InvalidTargetUrl(value.to_string())),
+                    _ => Err(ParseError::new(
+                        ParseErrorKind::InvalidTargetUrl,
+                        value.to_string(),
+                    )),
                 }
             }
         }
     }
 
+    #[allow(dead_code)]
+    // bug in lsp does not recognize this method is used
     pub fn has_scheme(&self) -> bool {
         match self {
             RequestTarget::Asterisk => false,
             RequestTarget::Absolute { uri, .. } => uri.scheme().is_some(),
             RequestTarget::RelativeOrigin { uri, .. } => uri.scheme().is_some(),
             RequestTarget::InvalidTarget(_) => false,
-        }
-    }
-
-    pub fn get_string(&self) -> String {
-        match self {
-            RequestTarget::Asterisk => String::from("*"),
-            RequestTarget::Absolute { string, .. } => string.to_string(),
-            RequestTarget::RelativeOrigin { string, .. } => string.to_string(),
-            RequestTarget::InvalidTarget(string) => string.clone(),
         }
     }
 }
@@ -291,6 +338,8 @@ pub struct Header {
 }
 
 impl Header {
+    #[allow(dead_code)]
+    // bug in lsp does not recognize this method is used
     pub fn new<S: Into<String>, T: Into<String>>(key: S, value: T) -> Self {
         Header {
             key: key.into(),
@@ -311,11 +360,22 @@ pub enum HttpRestFileExtension {
     Rest,
 }
 
+impl HttpRestFileExtension {
+    pub fn from_path(path: &std::path::Path) -> Option<Self> {
+        match path.extension().and_then(|os_str| os_str.to_str()) {
+            Some("http") => Some(HttpRestFileExtension::Http),
+            Some("rest") => Some(HttpRestFileExtension::Rest),
+            _ => None,
+        }
+    }
+}
+
 #[derive(PartialEq, Debug)]
 pub struct HttpRestFile {
-    requests: Vec<Request>,
-    path: Box<std::path::Path>,
-    extension: HttpRestFileExtension,
+    pub requests: Vec<Request>,
+    pub errs: Vec<ParseError>,
+    pub path: Box<std::path::PathBuf>,
+    pub extension: Option<HttpRestFileExtension>,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -387,7 +447,7 @@ impl CommentKind {
 }
 
 impl std::str::FromStr for CommentKind {
-    type Err = ParseErrorType;
+    type Err = ParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "//" => Ok(Self::DoubleSlash),
@@ -395,7 +455,10 @@ impl std::str::FromStr for CommentKind {
             "#" => Ok(Self::SingleTag),
             _ => {
                 let msg = format!("Invalid start characters for comment: {}", s);
-                Err(ParseErrorType::CommentTypeNotRecognized(msg))
+                Err(ParseError::new(
+                    ParseErrorKind::CommentTypeNotRecognized,
+                    msg,
+                ))
             }
         }
     }
@@ -424,9 +487,9 @@ pub struct HttpVersion {
 }
 
 impl std::str::FromStr for HttpVersion {
-    type Err = ParseErrorType;
+    type Err = ParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let err =  ParseErrorType::InvalidHttpVersion(String::from("Http version requires format: 'HTTP/\\d+.\\d+'. 
+        let err =  ParseError::new(ParseErrorKind::InvalidHttpVersion,String::from("Http version requires format: 'HTTP/\\d+.\\d+'. 
 For example 'HTTP/2.1'. You can also omit the version and only specify the url target of the request or the http method and the url target.
                 "));
         if !s.starts_with("HTTP/") {
@@ -449,6 +512,13 @@ impl std::fmt::Display for HttpVersion {
     }
 }
 
+#[derive(PartialEq, Debug)]
+pub struct RequestLine {
+    pub method: Option<HttpMethod>,
+    pub target: RequestTarget,
+    pub http_version: Option<HttpVersion>, // @TODO: use enum and validate
+}
+
 impl From<&str> for RequestTarget {
     fn from(value: &str) -> RequestTarget {
         match RequestTarget::parse(value) {
@@ -459,15 +529,6 @@ impl From<&str> for RequestTarget {
         // return a single error from parse and create conversion to parse error
     }
 }
-
-#[derive(PartialEq, Debug)]
-pub struct RequestLine {
-    pub method: Option<HttpMethod>,
-    pub target: RequestTarget,
-    pub http_version: Option<HttpVersion>, // @TODO: use enum and validate
-}
-
-impl RequestTarget {}
 
 impl Default for RequestLine {
     fn default() -> RequestLine {
@@ -492,6 +553,7 @@ impl ToString for RequestTarget {
 }
 
 impl Request {
+    #[allow(dead_code)]
     pub fn get_comment_text(&self) -> String {
         self.comments
             .iter()
@@ -504,5 +566,5 @@ impl Request {
 #[derive(PartialEq, Debug)]
 pub struct FileParseResult {
     pub requests: Vec<Request>,
-    pub errs: Vec<ParseErrorType>,
+    pub errs: Vec<ParseError>,
 }

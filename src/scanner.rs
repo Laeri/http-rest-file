@@ -7,16 +7,8 @@ pub struct Scanner {
 }
 
 #[derive(PartialEq, Debug)]
-pub enum Action<T> {
-    Request(T),
-    Require,
-    Return(T),
-}
-
-#[derive(PartialEq, Debug)]
 pub enum ScanError {
     EndOfLine, // end of line reached during parsing
-    Character(usize),
     InvalidRegexCaptureConversion, // regex with capture groups could not be converted
 }
 
@@ -26,7 +18,7 @@ impl From<regex::Error> for ScanError {
     }
 }
 
-#[derive(Eq, Debug, PartialOrd, Clone)]
+#[derive(Eq, Debug, Clone)]
 pub struct ScannerPos {
     cursor: usize,
 }
@@ -39,20 +31,25 @@ impl From<ScannerPos> for usize {
 
 impl PartialEq for ScannerPos {
     fn eq(&self, other: &Self) -> bool {
-        return self.cursor == other.cursor;
+        self.cursor == other.cursor
     }
 }
 
+impl PartialOrd for ScannerPos {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 impl Ord for ScannerPos {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if self.cursor > other.cursor {
-            std::cmp::Ordering::Greater
-        } else if self.cursor < other.cursor {
-            std::cmp::Ordering::Less
-        } else {
-            std::cmp::Ordering::Equal
-        }
+        self.cursor.cmp(&other.cursor)
     }
+}
+
+pub struct ErrorContext {
+    pub context: String,
+    pub line: u32,
+    pub column: u32,
 }
 
 #[derive(Debug)]
@@ -143,19 +140,44 @@ impl Scanner {
         }
     }
 
+    pub fn get_error_context(&self, start_pos: usize, end_pos: Option<usize>) -> ErrorContext {
+        let mut line = 0;
+        let mut last_newline_pos = 0;
+        for (index, char) in self.characters[..start_pos].iter().enumerate() {
+            if char == &'\n' {
+                line += 1;
+                last_newline_pos = index;
+            }
+        }
+
+        let column = start_pos - last_newline_pos;
+
+        let context = if let Some(end_pos) = end_pos {
+            self.characters[start_pos..end_pos]
+                .iter()
+                .collect::<String>()
+        } else {
+            self.characters[last_newline_pos..start_pos]
+                .iter()
+                .collect::<String>()
+        };
+
+        ErrorContext {
+            line,
+            column: column as u32,
+            context,
+        }
+    }
+
     pub fn get_from_to<S: Into<usize>, E: Into<usize>>(&self, start: S, end: E) -> String {
         let start: usize = start.into();
         let end = end.into();
         if start == end {
             return String::new();
-        } 
+        }
         self.characters[start..end].iter().collect::<String>()
     }
 
-    // Return the cursor which is the character index within the supplied string
-    pub fn cursor(&self) -> usize {
-        self.cursor
-    }
 
     // Return the character under the cursor without advancing
     pub fn peek(&self) -> Option<&char> {
@@ -197,6 +219,7 @@ impl Scanner {
 
     /// Get the next non whitespace character under the cursor without advancing.
     /// Following characters are skipped: space, tab, form feed, carriage return
+    #[allow(dead_code)]
     pub fn peek_skip_ws(&self) -> Option<char> {
         let mut peek_cursor = self.cursor;
         // whitespace is regular space, tab, carriage return and form feed
@@ -409,52 +432,6 @@ impl Scanner {
             .collect()
     }
 
-    pub fn scan<T>(
-        &mut self,
-        cb: impl Fn(&str) -> Option<Action<T>>,
-    ) -> Result<Option<T>, ScanError> {
-        let mut sequence = String::new();
-        let mut require = false;
-        let mut request = None;
-
-        loop {
-            match self.characters.get(self.cursor) {
-                Some(target) => {
-                    sequence.push(*target);
-                    match cb(&sequence) {
-                        Some(Action::Return(result)) => {
-                            self.cursor += 1;
-                            break Ok(Some(result));
-                        }
-                        Some(Action::Request(result)) => {
-                            self.cursor += 1;
-                            require = false;
-                            request = Some(result);
-                        }
-                        Some(Action::Require) => {
-                            self.cursor += 1;
-                            require = true;
-                        }
-                        None => {
-                            if require {
-                                break Err(ScanError::Character(self.cursor));
-                            } else {
-                                break Ok(request);
-                            }
-                        }
-                    }
-                }
-                None => {
-                    if require {
-                        break Err(ScanError::EndOfLine);
-                    } else {
-                        break Ok(request);
-                    }
-                }
-            }
-        }
-    }
-
     /// Return the previous line's bounds (start and end position)
     fn get_prev_line_bounds(&self) -> Option<(usize, usize)> {
         if self.cursor == 0 {
@@ -517,6 +494,7 @@ impl Scanner {
 }
 
 // only for debugging
+#[allow(dead_code)]
 #[cfg(debug_assertions)]
 impl Scanner {
     pub fn debug_string(&self) -> String {
@@ -790,8 +768,8 @@ mod tests {
         assert_eq!(scanner.get_prev_line_bounds(), None);
 
         scanner.skip_to_next_line();
-        assert_eq!(scanner.get_prev_line_bounds(), Some((0,3)));
+        assert_eq!(scanner.get_prev_line_bounds(), Some((0, 3)));
         scanner.skip_to_next_line();
-        assert_eq!(scanner.get_prev_line_bounds(), Some((4,7)));
+        assert_eq!(scanner.get_prev_line_bounds(), Some((4, 7)));
     }
 }

@@ -33,7 +33,7 @@ impl Serializer {
             {
                 result.push_str("###");
             }
-            result.push_str(&Serializer::serialize_request(&request));
+            result.push_str(&Serializer::serialize_request(request));
 
             // insert new line between requests
             if num_requests > 1 && index != num_requests - 1 {
@@ -106,6 +106,7 @@ impl Serializer {
             };
             result.push_str(&string);
         }
+
         if let Some(redirect) = &request.redirect {
             result.push_str("\n\n");
             let string = match redirect {
@@ -554,9 +555,7 @@ Content-Type: application/json
         assert_eq!(serialized, expected);
 
         // reparsing should return the same model
-        let file_parse_result = Parser::parse(&serialized)
-            .expect("parsing the serialized string should work")
-            .expect("should return a model");
+        let file_parse_result = Parser::parse(&serialized, false);
         assert_eq!(file_parse_result.errs, vec![]);
         assert_eq!(file_parse_result.requests.len(), 1);
         assert_eq!(
@@ -661,9 +660,7 @@ Content-Type: application/json
         assert_eq!(serialized, expected);
 
         // reparsing should return the same model
-        let file_parse_result = Parser::parse(&serialized)
-            .expect("parsing the serialized string should work")
-            .expect("should return a model");
+        let file_parse_result = Parser::parse(&serialized, false);
         assert_eq!(file_parse_result.errs, vec![]);
         assert_eq!(file_parse_result.requests.len(), 1);
         assert_eq!(

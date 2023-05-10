@@ -3,14 +3,14 @@ pub use crate::scanner::Scanner;
 use crate::{
     model,
     model::{
-        CommentKind, DataSource, FileParseResult, ParseErrorType, Redirect, RequestSettings,
-        ResponseHandler, SettingsEntry,
+        CommentKind, DataSource, FileParseResult, HttpRestFile, HttpRestFileExtension, ParseError,
+        ParseErrorKind, Redirect, RequestSettings, ResponseHandler, SettingsEntry,
     },
     parser::model::HttpMethod,
     scanner::{LineIterator, WS_CHARS},
 };
 pub use http::Uri;
-use std::str::FromStr;
+use std::{fs, str::FromStr};
 
 pub const REQUEST_SEPARATOR: &str = "###";
 pub const META_COMMENT_SLASH: &str = "//";
@@ -18,18 +18,20 @@ pub const META_COMMENT_TAG: &str = "#";
 
 pub struct Parser {}
 
+type ParseResult<T> = Result<(T, Vec<ParseError>), ParseError>;
+
 impl Parser {
     pub const REST_FILE_EXTENSIONS: [&str; 2] = ["http", "rest"];
+
+    #[allow(dead_code)]
     pub fn has_valid_extension<T: AsRef<std::path::Path>>(path: &T) -> bool {
-        let extension = path.as_ref().extension();
-        match extension {
+        match path.as_ref().extension() {
             Some(extension) => Parser::REST_FILE_EXTENSIONS.contains(&extension.to_str().unwrap()),
             _ => false,
         }
     }
 
-    pub fn parse_meta_name(scanner: &mut Scanner) -> Result<Option<String>, ParseErrorType> {
-        scanner.skip_empty_lines();
+    fn parse_meta_name(scanner: &mut Scanner) -> Result<Option<String>, ParseError> {
         scanner.skip_ws();
 
         let name_regex = "\\s*@name\\s*=\\s*(.*)";
@@ -42,20 +44,21 @@ impl Parser {
     }
 
     /// match a comment line after '###', '//' or '##' has been stripped from it
-    pub fn parse_comment_line(
+    fn parse_comment_line(
         scanner: &mut Scanner,
         kind: CommentKind,
-    ) -> Result<Option<model::Comment>, ParseErrorType> {
+    ) -> Result<Option<model::Comment>, ParseError> {
         scanner.skip_ws();
         match scanner.seek_return(&'\n') {
             Ok(value) => Ok(Some(model::Comment { value, kind })),
-            Err(_) => Err(ParseErrorType::General),
+            Err(_) => Err(ParseError::new(
+                ParseErrorKind::General,
+                "Expected request line after comment, end of file encountered",
+            )),
         }
     }
     /// match a comment line after '###', '//' or '##' has been stripped from it
-    pub fn parse_meta_comment_line(
-        scanner: &mut Scanner,
-    ) -> Option<Result<SettingsEntry, ParseErrorType>> {
+    fn parse_meta_comment_line(scanner: &mut Scanner) -> Option<Result<SettingsEntry, ParseError>> {
         scanner.skip_ws();
 
         let peek_line = scanner.peek_line();
@@ -81,7 +84,7 @@ impl Parser {
                 return None;
             }
 
-            let result: Option<Result<SettingsEntry, ParseErrorType>> = match line.unwrap().trim() {
+            let result: Option<Result<SettingsEntry, ParseError>> = match line.unwrap().trim() {
                 "@no-cookie-jar" => Some(Ok(SettingsEntry::NoCookieJar)),
                 "@no-redirect" => Some(Ok(SettingsEntry::NoRedirect)),
                 "@no-log" => Some(Ok(SettingsEntry::NoLog)),
@@ -101,7 +104,7 @@ impl Parser {
     }
 
     // @TODO: create a macro that generates a match statement for each enum variant
-    pub fn match_request_method(str: &str) -> model::HttpMethod {
+    fn match_request_method(str: &str) -> model::HttpMethod {
         match str {
             "GET" => HttpMethod::GET,
             "PUT" => HttpMethod::PUT,
@@ -116,37 +119,25 @@ impl Parser {
         }
     }
 
-    pub fn parse_request_target(
-        target_str: &str,
-    ) -> Result<Option<model::RequestTarget>, ParseErrorType> {
-        let target = RequestTarget::from(target_str);
-        if let RequestTarget::InvalidTarget(value) = target {
-            return Err(ParseErrorType::InvalidTargetUrl(value));
-        }
-
-        Ok(Some(target))
-    }
-
     // [method required-whitespace] request-target [required-whitespace http-version]
     // @TODO errors are ignored for now!
-    pub fn parse_request_line(
-        scanner: &mut Scanner,
-    ) -> Result<Option<model::RequestLine>, ParseErrorType> {
+    fn parse_request_line(scanner: &mut Scanner) -> ParseResult<model::RequestLine> {
         let mut line = match scanner.get_line_and_advance() {
             Some(line) => line,
             _ => String::new(),
         };
 
+        let line_start = scanner.get_pos();
         // request line can be split over multiple lines but all lines following need to be
         // indented
         let line_iterator: LineIterator = scanner.iter_at_pos();
 
-        let (indented_lines, cursor): (Vec<String>, usize) =
+        let (indented_lines, line_end): (Vec<String>, usize) =
             line_iterator.take_while_peek(|line| {
                 !line.is_empty() && WS_CHARS.contains(&line.chars().next().unwrap())
             });
 
-        scanner.set_pos(cursor);
+        scanner.set_pos(line_end);
 
         if !indented_lines.is_empty() {
             line.push_str(
@@ -162,16 +153,16 @@ impl Parser {
         let tokens: Vec<String> = line_scanner.get_tokens();
 
         // @TODO: still keep error around but also return 'patched up' model?
-        let (request_line, _err) = match &tokens[..] {
+        let (request_line, err): (model::RequestLine, Option<ParseError>) = match &tokens[..] {
             [target_str] => {
                 // @TODO: why can't we pass target_str or &(*target_str) directly?
                 let str: &str = target_str;
                 (
-                    Some(model::RequestLine {
+                    model::RequestLine {
                         target: RequestTarget::from(str),
                         method: None,
                         http_version: None,
-                    }),
+                    },
                     None,
                 )
             }
@@ -180,42 +171,42 @@ impl Parser {
                 let str: &str = target_str;
 
                 (
-                    Some(model::RequestLine {
+                    model::RequestLine {
                         target: RequestTarget::from(str),
                         method: Some(Parser::match_request_method(method)),
                         http_version: None,
-                    }),
+                    },
                     None,
                 )
             }
 
             [method, target_str, http_version_str] => {
                 let result = model::HttpVersion::from_str(http_version_str);
-                let (http_version, err) = match result {
+                let (http_version, http_version_err) = match result {
                     Ok(version) => (Some(version), None),
-                    Err(_) => (None, None),
+                    Err(err) => (None, Some(err)),
                 };
 
                 // @TODO: why can't we pass target_str or &(*target_str) directly?
                 let str: &str = target_str;
                 (
-                    Some(model::RequestLine {
+                    model::RequestLine {
                         target: RequestTarget::from(str),
                         method: Some(Parser::match_request_method(method)),
                         http_version,
-                    }),
-                    err,
+                    },
+                    http_version_err,
                 )
             }
             // we are missing at least the url
-            [] => (
-                None,
-                Some(ParseErrorType::MissingRequestTargetUrl(String::from(
+            [] => {
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::MissingRequestTargetUrl,
                     "The request line should have at least a target url.",
-                ))),
-            ),
-            // @TODO: ERROR
-
+                    line_start,
+                    Some(line_end),
+                ))
+            }
             // on a request line only method, target and http_version should be present
             [method, target_str, http_version_str, ..] => {
                 /* if let Err(parse_error) = Parser::validate_http_version(http_version) {
@@ -230,26 +221,35 @@ impl Parser {
 
                 let str: &str = target_str;
                 (
-                    Some(model::RequestLine {
+                    model::RequestLine {
                         target: RequestTarget::from(str),
                         method: Some(Parser::match_request_method(method)),
                         http_version,
-                    }),
-                    Some(ParseErrorType::TooManyElementsOnRequestLine(format!(
-                        "There are too many elements on this line for a request.
+                    },
+                    Some(ParseError::new_with_position(
+                        ParseErrorKind::TooManyElementsOnRequestLine,
+                        format!(
+                            "There are too many elements on this line for a request.
 There should only be method, target url and http version.
 You have additional elements: '{}'",
-                        tokens[3..].join(",")
-                    ))),
+                            tokens[3..].join(","),
+                        ),
+                        line_start,
+                        Some(line_end),
+                    )),
                 )
             } // @TODO: ERROR
         };
 
+        let mut errs: Vec<ParseError> = Vec::new();
+        if let Some(err) = err {
+            errs.push(err);
+        }
         // @TODO: validate target, http_version
-        Ok(request_line)
+        Ok((request_line, errs))
     }
 
-    pub fn parse_comment(scanner: &mut Scanner) -> Result<Option<model::Comment>, ParseErrorType> {
+    fn parse_comment(scanner: &mut Scanner) -> Result<Option<model::Comment>, ParseError> {
         scanner.skip_empty_lines();
         // comments can be indented
         scanner.skip_ws();
@@ -275,40 +275,58 @@ You have additional elements: '{}'",
         Ok(None)
     }
 
-    pub fn parse_multipart_part(
+    fn parse_multipart_part(
         scanner: &mut Scanner,
         boundary: &str,
-    ) -> Result<model::Multipart, ParseErrorType> {
+    ) -> Result<model::Multipart, ParseError> {
         let boundary_line = format!("--{}", boundary);
         let multipart_end_line = format!("--{}--", boundary);
 
         let escaped_boundary = regex::escape(&boundary_line);
         let first_boundary = scanner.match_regex_forward(&escaped_boundary);
         if first_boundary.is_err() {
-            return Err(ParseErrorType::InvalidMultipart(
-                "Multipart requires a first starting boundary before first part content."
-                    .to_string(),
+            return Err(ParseError::new_with_position(
+                ParseErrorKind::InvalidMultipart,
+                "Multipart requires a first starting boundary before first part content.",
+                scanner.get_pos(),
+                None::<usize>,
             ));
         }
 
         scanner.skip_to_next_line(); // @TODO: nothing else should be here
 
+        let start_pos = scanner.get_pos();
+
         let part_headers = Parser::parse_headers(scanner).map_err(|_err| {
-            ParseErrorType::InvalidMultipart("Multipart headers could not be parsed".to_string())
+            ParseError::new_with_position(
+                ParseErrorKind::InvalidMultipart,
+                "Multipart headers could not be parsed",
+                scanner.get_pos(),
+                None::<usize>,
+            )
         })?;
+        let end_pos = scanner.get_pos();
 
         let (mut fields, part_headers) = match &part_headers[..] {
             [] => {
-                return Err(ParseErrorType::InvalidMultipart(
-                    "Multipart part is missing 'Content-Disposition' header".to_string(),
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidMultipart,
+                    "Multipart part is missing 'Content-Disposition' header",
+                    start_pos,
+                    Some(end_pos),
                 ));
             }
             [disposition_part, part_headers @ ..] => {
                 if disposition_part.key != "Content-Disposition" {
-                    return Err(ParseErrorType::InvalidMultipart(format!(
-                        "First Multipart header should be 'Content-Disposition', found: {}",
-                        disposition_part.key
-                    )));
+                    return Err(ParseError::new_with_position(
+                        ParseErrorKind::InvalidMultipart,
+                        format!(
+                            "First Multipart header should be 'Content-Disposition', found: {}",
+                            disposition_part.key
+                        ),
+                        start_pos,
+                        Some(end_pos),
+                    ));
                 }
                 let parts: Vec<&str> = disposition_part.value.split(';').collect();
                 let mut parts_iter = parts.iter();
@@ -316,10 +334,15 @@ You have additional elements: '{}'",
                 if disposition_type != "form-data" {
                     // only form-data is valid in http context, other disposition types may exist
                     // for other applications (email mime types...)
-                    return Err(ParseErrorType::InvalidMultipart(format!(
-                        "Multipart Content-Disposition should have type 'form-data', found: {}",
-                        disposition_type
-                    )));
+                    return Err(ParseError::new_with_position(
+                        ParseErrorKind::InvalidMultipart,
+                        format!(
+                            "Multipart Content-Disposition should have type 'form-data', found: {}",
+                            disposition_type
+                        ),
+                        start_pos,
+                        Some(end_pos),
+                    ));
                 }
                 let mut fields: Vec<model::DispositionField> = Vec::new();
                 for disposition_field in parts_iter {
@@ -332,7 +355,7 @@ You have additional elements: '{}'",
                             fields.push(field);
                         },
                             _ => {
-                            return Err(ParseErrorType::InvalidMultipart(format!("Expected content disposition values in form <key>=<value> or <key>=\"<value>\" but found: '{}'", disposition_field)))
+                            return Err(ParseError::new(ParseErrorKind::InvalidMultipart, format!("Expected content disposition values in form <key>=<value> or <key>=\"<value>\" but found: '{}'", disposition_field)))
                         }
 
                     }
@@ -343,27 +366,32 @@ You have additional elements: '{}'",
 
         let name_index = fields.iter().position(|field| field.key == "name");
         if name_index.is_none() {
-            return Err(ParseErrorType::InvalidMultipart(format!(
-                "Content-Disposition requires field 'name', found only: {:?}",
-                fields
-            )));
+            return Err(ParseError::new_with_position(
+                ParseErrorKind::InvalidMultipart,
+                format!(
+                    "Content-Disposition requires field 'name', found only: {:?}",
+                    fields
+                ),
+                start_pos,
+                Some(end_pos),
+            ));
         }
 
         let name = fields.remove(name_index.unwrap());
 
         if !scanner.match_str_forward("\n") {
-            return Err(ParseErrorType::InvalidMultipart(
-                "Requires empty line in multipart after Content-Disposition and other headers"
-                    .to_string(),
+            return Err(ParseError::new(
+                ParseErrorKind::InvalidMultipart,
+                "Requires empty line in multipart after Content-Disposition and other headers",
             ));
         }
 
         let peek_line = scanner.peek_line();
 
         if peek_line.is_none() {
-            return Err(ParseErrorType::InvalidMultipart(
-                "Multipart should be ended with --<boundary>--. End of file encountered."
-                    .to_string(),
+            return Err(ParseError::new(
+                ParseErrorKind::InvalidMultipart,
+                "Multipart should be ended with --<boundary>--. End of file encountered.",
             ));
         }
 
@@ -391,9 +419,11 @@ You have additional elements: '{}'",
             loop {
                 let peek_line = scanner.peek_line();
                 if peek_line.is_none() {
-                    return Err(ParseErrorType::InvalidMultipart(
-                        "Multipart should be ended with --<boundary>--. Encountered end of file. "
-                            .to_string(),
+                    return Err(ParseError::new_with_position(
+                        ParseErrorKind::InvalidMultipart,
+                        "Multipart should be ended with --<boundary>--. Encountered end of file. ",
+                        scanner.get_pos(),
+                        None::<usize>,
                     ));
                 };
                 let peek_line = peek_line.unwrap();
@@ -418,16 +448,16 @@ You have additional elements: '{}'",
         }
     }
 
-    pub fn parse_multipart_body(
+    fn parse_multipart_body(
         scanner: &mut Scanner,
         boundary: &str,
-    ) -> Result<model::RequestBody, ParseErrorType> {
+    ) -> Result<model::RequestBody, ParseError> {
         scanner.skip_empty_lines();
 
         // parse multipart @TODO check content type is a-ok!
         let mut parts: Vec<Multipart> = Vec::new();
 
-        let mut errors: Vec<ParseErrorType> = Vec::new();
+        let mut errors: Vec<ParseError> = Vec::new();
         loop {
             let multipart = Parser::parse_multipart_part(scanner, boundary);
             if let Err(err) = multipart {
@@ -450,10 +480,12 @@ You have additional elements: '{}'",
             if !scanner.match_str_forward(&next_boundary) {
                 // @TDOO: return error and parsed rest...
                 // @TODO: better error message
-                return Err(ParseErrorType::InvalidMultipart(format!(
-                    "Expected next boundary: {}. ",
-                    &next_boundary
-                )));
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidMultipart,
+                    format!("Expected next boundary: {}. ", &next_boundary),
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
             }
         }
         Ok(model::RequestBody::Multipart {
@@ -462,7 +494,7 @@ You have additional elements: '{}'",
         })
     }
 
-    pub fn parse_headers(scanner: &mut Scanner) -> Result<Vec<model::Header>, ParseErrorType> {
+    fn parse_headers(scanner: &mut Scanner) -> Result<Vec<model::Header>, ParseError> {
         let mut headers: Vec<model::Header> = Vec::new();
 
         let header_regex = regex::Regex::from_str("^([^:]+):\\s*(.+)\\s*").unwrap();
@@ -485,7 +517,12 @@ You have additional elements: '{}'",
                 line
             );
             if captures.is_none() {
-                return Err(ParseErrorType::InvalidHeaderFields(err_msg));
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidHeaderFields,
+                    err_msg,
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
             }
             let captures = captures.unwrap();
             match (captures.get(1), captures.get(2)) {
@@ -497,7 +534,12 @@ You have additional elements: '{}'",
                     })
                 }
                 _ => {
-                    return Err(ParseErrorType::InvalidHeaderFields(err_msg));
+                    return Err(ParseError::new_with_position(
+                        ParseErrorKind::InvalidHeaderFields,
+                        err_msg,
+                        scanner.get_pos(),
+                        None::<usize>,
+                    ));
                 }
             }
         }
@@ -505,12 +547,12 @@ You have additional elements: '{}'",
 
     // TODO:
     // https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
-    pub fn is_multipart_boundary_valid(boundary: &str) -> Result<(), ParseErrorType> {
+    fn is_multipart_boundary_valid(boundary: &str) -> Result<(), ParseError> {
         let boundary_len = boundary.len();
         if !(1..=70).contains(&boundary_len) {
-            return Err(ParseErrorType::InvalidHeaderFields(
-                "Boundary within multipart content type is required to be 1-70 characters long."
-                    .to_string(),
+            return Err(ParseError::new(
+                ParseErrorKind::InvalidHeaderFields,
+                "Boundary within multipart content type is required to be 1-70 characters long.",
             ));
         }
 
@@ -533,7 +575,8 @@ You have additional elements: '{}'",
                 | b'?'
                 | b'=' => continue,
                 invalid_byte => {
-                    return Err(ParseErrorType::InvalidHeaderFields(
+                    return Err(ParseError::new(
+                        ParseErrorKind::InvalidHeaderFields,
                         "Invalid character found for multipart boundary: ".to_string()
                             + &(String::from_utf8(vec![invalid_byte.to_owned()]).unwrap()),
                     ));
@@ -543,12 +586,12 @@ You have additional elements: '{}'",
         Ok(())
     }
 
-    pub fn parse_body(
+    fn parse_body(
         scanner: &mut Scanner,
         headers: &[model::Header],
-    ) -> (model::RequestBody, Vec<ParseErrorType>) {
+    ) -> (model::RequestBody, Vec<ParseError>) {
         let mut body = model::RequestBody::None;
-        let mut parse_errs: Vec<ParseErrorType> = Vec::new();
+        let mut parse_errs: Vec<ParseError> = Vec::new();
         if let Some(multipart_header) = headers.iter().find(|header| {
             header.key == "Content-Type" && header.value.starts_with("multipart/form-data")
         }) {
@@ -564,7 +607,7 @@ You have additional elements: '{}'",
                 // either with or without quotes
                 if boundary_match.is_none() {
                     let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
-                    parse_errs.push(ParseErrorType::InvalidHeaderFields(msg));
+                    parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg));
                 }
                 let mut boundary = boundary_match.unwrap().as_str();
                 if boundary.starts_with('"') && boundary.ends_with('"') {
@@ -580,7 +623,7 @@ You have additional elements: '{}'",
                 };
             } else {
                 let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
-                parse_errs.push(ParseErrorType::InvalidHeaderFields(msg))
+                parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg))
             }
         } else {
             if scanner.is_done() {
@@ -600,7 +643,7 @@ You have additional elements: '{}'",
                 }
 
                 // response handler
-                if peek_line.starts_with(">") {
+                if peek_line.starts_with('>') {
                     // if previous line is empty then do not parse it as body before response
                     // handler, when serializing we put an additional new line for clarity that
                     // should not be part of the body
@@ -642,26 +685,32 @@ You have additional elements: '{}'",
                 body = model::RequestBody::Text {
                     // We trim trailing newlines, jetbrains client does the same
                     // However, this means a text body cannot contain trailing newlines @TODO
-                    data: DataSource::Raw(body_str.trim_end_matches("\n").to_string()),
+                    data: DataSource::Raw(body_str.trim_end_matches('\n').to_string()),
                 };
             }
         }
         (body, parse_errs)
     }
 
-    pub fn parse_pre_request_script(
+    fn parse_pre_request_script(
         scanner: &mut Scanner,
-    ) -> Result<Option<model::PreRequestScript>, ParseErrorType> {
-        if !scanner.match_str_forward("<") {
+    ) -> Result<Option<model::PreRequestScript>, ParseError> {
+        if !scanner.take(&'<') {
             return Ok(None);
         };
+        let start_pos = scanner.get_pos();
         scanner.skip_ws();
         if !scanner.match_str_forward("{%") {
             // if no starting script is found then a handler script should be presnet
             let line = scanner.get_line_and_advance();
             if line.is_none() {
                 let msg = "Expected pre request starting characters '{%' after a matching '<', or a filepath to a handler script above the request.".to_string();
-                return Err(ParseErrorType::InvalidPreRequestScript(msg));
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidPreRequestScript,
+                    msg,
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
             }
             return Ok(Some(model::PreRequestScript::FromFilepath(
                 line.unwrap().trim().to_string(),
@@ -677,8 +726,11 @@ You have additional elements: '{}'",
                     found = true;
                     break;
                 } else {
-                    return Err(ParseErrorType::InvalidPreRequestScript(
-                        "Invalid pre request script found".to_string(),
+                    return Err(ParseError::new_with_position(
+                        ParseErrorKind::InvalidPreRequestScript,
+                        "Invalid pre request script found",
+                        start_pos,
+                        Some(scanner.get_pos()),
                     ));
                 }
             } else {
@@ -693,22 +745,28 @@ You have additional elements: '{}'",
 
         if !found {
             let msg = "Error parsing pre request script. Expected closing chraacters '}%' but none were found".to_string();
-            return Err(ParseErrorType::InvalidPreRequestScript(msg));
+            return Err(ParseError::new_with_position(
+                ParseErrorKind::InvalidPreRequestScript,
+                msg,
+                start_pos,
+                Some(scanner.get_pos()),
+            ));
         }
         scanner.skip_to_next_line();
         Ok(Some(model::PreRequestScript::Script(lines.join("\n"))))
     }
 
-    pub fn parse_response_handler(
+    fn parse_response_handler(
         scanner: &mut Scanner,
-    ) -> Result<Option<model::ResponseHandler>, ParseErrorType> {
+    ) -> Result<Option<model::ResponseHandler>, ParseError> {
         scanner.skip_empty_lines();
         scanner.skip_ws();
-        if !scanner.match_str_forward(">") {
+        if !scanner.take(&'>') {
             return Ok(None);
         }
         scanner.skip_ws();
         scanner.skip_empty_lines();
+        let start_pos = scanner.get_pos();
         if scanner.match_str_forward("{%") {
             let mut lines: Vec<String> = Vec::new();
             let mut found = false;
@@ -720,7 +778,12 @@ You have additional elements: '{}'",
                         break;
                     } else {
                         let msg = "Expected closing %} for response handler, response handler script is malformed.";
-                        return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
+                        return Err(ParseError::new_with_position(
+                            ParseErrorKind::InvalidResponseHandler,
+                            msg.to_string(),
+                            start_pos,
+                            Some(scanner.get_pos()),
+                        ));
                     }
                 } else {
                     let line = scanner.get_line_and_advance();
@@ -732,17 +795,27 @@ You have additional elements: '{}'",
             }
             if !found {
                 let msg = "Expected a closing %} for response script, none was found";
-                return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidResponseHandler,
+                    msg.to_string(),
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
             }
 
             scanner.skip_to_next_line();
 
-            return Ok(Some(ResponseHandler::Script(lines.join("\n"))));
+            Ok(Some(ResponseHandler::Script(lines.join("\n"))))
         } else {
             let path = scanner.get_line_and_advance();
             if path.is_none() || path.as_ref().unwrap().is_empty() {
                 let msg = "Invalid response handler, expect either a path to a handlerscript after '>' or a handler script {% %} but neither has been found.";
-                return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidResponseHandler,
+                    msg.to_string(),
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
             }
 
             return Ok(Some(ResponseHandler::FromFilepath(
@@ -751,40 +824,44 @@ You have additional elements: '{}'",
         }
     }
 
-    pub fn parse_redirect(scanner: &mut Scanner) -> Result<Option<Redirect>, ParseErrorType> {
+    fn parse_redirect(scanner: &mut Scanner) -> Result<Option<Redirect>, ParseError> {
         scanner.skip_empty_lines();
+        let start_pos = scanner.get_pos();
         if !scanner.match_str_forward(">>") {
             return Ok(None);
         }
 
         let mut rewrite = false;
-        if scanner.match_str_forward("!") {
+        if scanner.take(&'!') {
             rewrite = true;
         }
 
         let path = scanner.get_line_and_advance();
 
         if path.is_none() {
-            return Err(ParseErrorType::RedirectMissingPath(
-                "Missing path to file after redirect".to_string(),
+            return Err(ParseError::new_with_position(
+                ParseErrorKind::RedirectMissingPath,
+                "Missing path to file after redirect",
+                start_pos,
+                Some(scanner.get_pos()),
             ));
         }
 
         let path = path.unwrap().trim().to_string();
 
         if rewrite {
-            return Ok(Some(Redirect::RewriteFile(path)));
+            Ok(Some(Redirect::RewriteFile(path)))
         } else {
-            return Ok(Some(Redirect::NewFileIfExists(path)));
+            Ok(Some(Redirect::NewFileIfExists(path)))
         }
     }
 
     pub fn parse_request(
         scanner: &mut Scanner,
-    ) -> Result<Option<(model::Request, Vec<ParseErrorType>)>, Vec<ParseErrorType>> {
+    ) -> Result<(model::Request, Vec<ParseError>), Vec<ParseError>> {
         let mut comments = Vec::new();
         let mut name: Option<String> = None;
-        let mut parse_errs: Vec<ParseErrorType> = Vec::new();
+        let mut parse_errs: Vec<ParseError> = Vec::new();
         let mut request_settings = RequestSettings::default();
         let mut pre_request_script: Option<model::PreRequestScript> = None;
 
@@ -840,9 +917,9 @@ You have additional elements: '{}'",
         }
 
         let request_line = match Parser::parse_request_line(scanner) {
-            Ok(Some(line)) => line,
-            Ok(None) => {
-                return Ok(None);
+            Ok((request_line, errs)) => {
+                parse_errs.extend(errs);
+                request_line
             }
             Err(parse_error) => {
                 parse_errs.push(parse_error);
@@ -866,7 +943,7 @@ You have additional elements: '{}'",
                     response_handler: None,
                     redirect: None,
                 };
-                return Ok(Some((request_node, parse_errs)));
+                return Ok((request_node, parse_errs));
             }
         }
 
@@ -914,40 +991,102 @@ You have additional elements: '{}'",
             let first_comment = request_node.comments.remove(0);
             request_node.name = Some(first_comment.value);
         }
-        Ok(Some((request_node, parse_errs)))
+        Ok((request_node, parse_errs))
     }
 
-    pub fn parse(string: &str) -> Result<Option<model::FileParseResult>, ParseErrorType> {
+    pub fn parse_file(path: &std::path::Path) -> Result<model::HttpRestFile, ParseError> {
+        if let Ok(content) = fs::read_to_string(path) {
+            let result = Parser::parse(&content, true);
+            if result.requests.is_empty() {
+                return Err(ParseError::new(ParseErrorKind::NoRequestFoundInFile, ""));
+            }
+            Ok(HttpRestFile {
+                requests: result.requests,
+                errs: result.errs,
+                path: Box::new(path.to_owned()),
+                extension: HttpRestFileExtension::from_path(path),
+            })
+        } else {
+            let path_str = path.to_str();
+            if path_str.is_none() {
+                return Err(ParseError::new(ParseErrorKind::InvalidFilePath, ""));
+            }
+            Err(ParseError::new(
+                ParseErrorKind::FileReadError,
+                format!("Could not read file content, path: {}", path_str.unwrap()),
+            ))
+        }
+    }
+
+    pub fn parse(string: &str, print_errors: bool) -> model::FileParseResult {
         let mut scanner = Scanner::new(string);
 
         let mut requests: Vec<model::Request> = Vec::new();
-        let mut errs: Vec<ParseErrorType> = Vec::new();
+        let mut errs: Vec<ParseError> = Vec::new();
 
         loop {
             scanner.skip_empty_lines();
             match Parser::parse_request(&mut scanner) {
-                Ok(Some((request, current_errs))) => {
+                Ok((request, current_errs)) => {
                     requests.push(request);
                     errs.extend(current_errs);
                 }
-                Ok(None) => {}
                 Err(parse_errs) => {
                     errs.extend(parse_errs);
                 }
             }
             scanner.skip_empty_lines();
+            scanner.skip_ws();
             if scanner.is_done() {
                 break;
             }
+
+            // There might be an ending Request separator or not
             if !scanner.match_str_forward(REQUEST_SEPARATOR) {
                 let msg = format!(
                     "Expected request to be terminated with '###' found {}",
                     scanner.peek_line().map_or("".to_string(), |l| l)
                 );
-                errs.push(ParseErrorType::InvalidRequestBoundary(msg))
+                errs.push(ParseError::new_with_position(
+                    ParseErrorKind::InvalidRequestBoundary,
+                    msg,
+                    scanner.get_pos(),
+                    None::<usize>,
+                ))
+            }
+            scanner.skip_empty_lines();
+            scanner.skip_ws();
+            if scanner.is_done() {
+                break;
             }
         }
-        Ok(Some(FileParseResult { requests, errs }))
+        if dbg!(!errs.is_empty() && print_errors) {
+            eprintln!("{}", Parser::pretty_print_errs(&scanner, errs.iter()));
+        }
+        FileParseResult { requests, errs }
+    }
+
+    fn pretty_print_errs<'a, T>(scanner: &Scanner, errs: T) -> String
+    where
+        T: Iterator<Item = &'a ParseError>,
+    {
+        errs.map(|err| Parser::pretty_err_string(scanner, err))
+            .collect::<Vec<String>>()
+            .join(&format!("\n{}\n", "-".repeat(50)))
+    }
+
+    fn pretty_err_string(scanner: &Scanner, err: &ParseError) -> String {
+        let mut result = String::new();
+        result.push_str(&format!("Error: {:?} - {}\n", err.kind, err.message));
+        if err.start_pos.is_some() {
+            let error_context = scanner.get_error_context(err.start_pos.unwrap(), err.end_pos);
+            result.push_str(&format!(
+                "Position: {}:{}\n",
+                error_context.line, error_context.column
+            ));
+            result.push_str(&error_context.context);
+        }
+        result
     }
 }
 
@@ -967,7 +1106,7 @@ mod tests {
 
 https://httpbin.org
 ";
-        let parsed = Parser::parse(str);
+        let parsed = Parser::parse(str, false);
 
         let expected = vec![model::Request {
             name: Some(String::from("test name")),
@@ -985,13 +1124,8 @@ https://httpbin.org
             redirect: None,
         }];
 
-        match parsed {
-            Ok(Some(FileParseResult { requests, errs })) => {
-                assert!(errs.is_empty());
-                assert_eq!(requests, expected)
-            }
-            _ => panic!("no valid parse result {:?}", parsed),
-        }
+        assert!(parsed.errs.is_empty());
+        assert_eq!(parsed.requests, expected);
     }
 
     #[test]
@@ -1001,7 +1135,7 @@ https://httpbin.org
 
 https://httpbin.org
 ";
-        let parsed = Parser::parse(str);
+        let parsed = Parser::parse(str, false);
 
         let expected = vec![model::Request {
             name: Some("test name".to_string()),
@@ -1019,13 +1153,8 @@ https://httpbin.org
             redirect: None,
         }];
 
-        match parsed {
-            Ok(Some(FileParseResult { requests, errs })) => {
-                assert!(errs.is_empty());
-                assert_eq!(requests, expected)
-            }
-            _ => panic!("no valid parse result {:?}", parsed),
-        }
+        assert!(parsed.errs.is_empty());
+        assert_eq!(parsed.requests, expected)
     }
 
     #[test]
@@ -1038,7 +1167,7 @@ https://httpbin.org
 GET https://test.com
 ";
         // if there is a ### comment and a @name section use the @name section as name
-        let FileParseResult { mut requests, errs } = Parser::parse(str).unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert!(requests.len() == 1);
         let request = requests.remove(0);
         assert!(errs.len() == 0);
@@ -1066,7 +1195,7 @@ GET https://test.com
 
 CUSTOMVERB https://httpbin.org
 ";
-        let parsed = Parser::parse(str);
+        let parsed = Parser::parse(str, false);
 
         let expected = vec![model::Request {
             name: Some(String::from("test name")),
@@ -1084,13 +1213,8 @@ CUSTOMVERB https://httpbin.org
             redirect: None,
         }];
 
-        match parsed {
-            Ok(Some(FileParseResult { requests, errs })) => {
-                assert!(errs.is_empty());
-                assert_eq!(requests, expected)
-            }
-            _ => panic!("no valid parse result {:?}", parsed),
-        }
+        assert!(parsed.errs.is_empty());
+        assert_eq!(parsed.requests, expected);
     }
 
     #[test]
@@ -1100,7 +1224,7 @@ CUSTOMVERB https://httpbin.org
 
 POST https://httpbin.org
 ";
-        let parsed = Parser::parse(str);
+        let parsed = Parser::parse(str, false);
 
         let expected = vec![model::Request {
             name: Some("test name".to_string()),
@@ -1118,13 +1242,8 @@ POST https://httpbin.org
             redirect: None,
         }];
 
-        match parsed {
-            Ok(Some(FileParseResult { requests, errs })) => {
-                assert!(errs.is_empty());
-                assert_eq!(requests, expected)
-            }
-            _ => panic!("no valid parse result {:?}", parsed),
-        }
+        assert!(parsed.errs.is_empty());
+        assert_eq!(parsed.requests, expected);
     }
 
     #[test]
@@ -1134,7 +1253,7 @@ POST https://httpbin.org
 
 POST https://httpbin.org
 ";
-        let parsed = Parser::parse(str);
+        let parsed = Parser::parse(str, false);
 
         let expected = vec![model::Request {
             name: Some(String::from("test name")),
@@ -1153,14 +1272,9 @@ POST https://httpbin.org
         }];
 
         // whitespace before or after name should be removed
-        match parsed {
-            Ok(Some(FileParseResult { requests, errs })) => {
-                assert_eq!(requests[0].name, Some("test name".to_string()));
-                assert!(errs.is_empty());
-                assert_eq!(requests, expected)
-            }
-            _ => panic!("no valid parse result {:?}", parsed),
-        }
+        assert_eq!(parsed.requests[0].name, Some("test name".to_string()));
+        assert!(parsed.errs.is_empty());
+        assert_eq!(parsed.requests, expected);
     }
 
     #[test]
@@ -1173,21 +1287,16 @@ POST https://httpbin.org
 
 POST https://httpbin.org
 ";
-        let parsed = Parser::parse(str);
+        let parsed = Parser::parse(str, false);
 
-        match parsed {
-            Ok(Some(FileParseResult { requests, errs })) => {
-                assert!(errs.is_empty());
-                assert_eq!(
-                    requests[0].get_comment_text(),
-                    "Comment one\nComment line two    \nThis comment type is also allowed      ",
-                    "parsed: {:?}, {:?}",
-                    requests,
-                    errs
-                )
-            }
-            _ => panic!("no valid parse result {:?}", parsed),
-        }
+        assert!(parsed.errs.is_empty());
+        assert_eq!(
+            parsed.requests[0].get_comment_text(),
+            "Comment one\nComment line two    \nThis comment type is also allowed      ",
+            "parsed: {:?}, {:?}",
+            parsed.requests,
+            parsed.errs
+        );
     }
 
     #[test]
@@ -1202,14 +1311,14 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_asterisk() {
-        let FileParseResult { mut requests, errs } = Parser::parse("*").unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse("*", false);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
         assert_eq!(errs, vec![]);
 
         // @TODO: is asterisk form only for OPTIONS request?
-        let FileParseResult { mut requests, errs } = Parser::parse("GET *").unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse("GET *", false);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
 
@@ -1219,7 +1328,7 @@ POST https://httpbin.org
         assert_eq!(errs, vec![]);
 
         let FileParseResult { mut requests, errs } =
-            Parser::parse("CUSTOMMETHOD * HTTP/1.1").unwrap().unwrap();
+            Parser::parse("CUSTOMMETHOD * HTTP/1.1", false);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
 
@@ -1238,9 +1347,7 @@ POST https://httpbin.org
     #[test]
     pub fn request_target_absolute() {
         let FileParseResult { mut requests, errs } =
-            Parser::parse("https://test.com/api/v1/user?show_all=true&limit=10")
-                .unwrap()
-                .unwrap();
+            Parser::parse("https://test.com/api/v1/user?show_all=true&limit=10", false);
 
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1276,10 +1383,10 @@ POST https://httpbin.org
         assert_eq!(errs, vec![]);
 
         // method and URL
-        let FileParseResult { requests, errs } =
-            Parser::parse("GET https://test.com/api/v1/user?show_all=true&limit=10")
-                .unwrap()
-                .unwrap();
+        let FileParseResult { requests, errs } = Parser::parse(
+            "GET https://test.com/api/v1/user?show_all=true&limit=10",
+            false,
+        );
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.request_line.target, expected_target);
@@ -1288,10 +1395,10 @@ POST https://httpbin.org
         assert_eq!(errs, vec![]);
 
         // method and URL and http version
-        let FileParseResult { mut requests, errs } =
-            Parser::parse("GET https://test.com/api/v1/user?show_all=true&limit=10    HTTP/1.1")
-                .unwrap()
-                .unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse(
+            "GET https://test.com/api/v1/user?show_all=true&limit=10    HTTP/1.1",
+            false,
+        );
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
@@ -1305,7 +1412,7 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_no_scheme_with_host_no_path() {
-        let FileParseResult { mut requests, errs } = Parser::parse("test.com").unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse("test.com", false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1326,8 +1433,7 @@ POST https://httpbin.org
 
     #[test]
     pub fn request_target_no_scheme_with_host_and_path() {
-        let FileParseResult { mut requests, errs } =
-            Parser::parse("test.com/api/v1/test").unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse("test.com/api/v1/test", false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1353,9 +1459,7 @@ POST https://httpbin.org
     #[test]
     pub fn request_target_relative() {
         let FileParseResult { mut requests, errs } =
-            Parser::parse("/api/v1/user?show_all=true&limit=10")
-                .unwrap()
-                .unwrap();
+            Parser::parse("/api/v1/user?show_all=true&limit=10", false);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
 
@@ -1387,9 +1491,7 @@ POST https://httpbin.org
 
         // method and URL
         let FileParseResult { mut requests, errs } =
-            Parser::parse("GET /api/v1/user?show_all=true&limit=10")
-                .unwrap()
-                .unwrap();
+            Parser::parse("GET /api/v1/user?show_all=true&limit=10", false);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
@@ -1399,9 +1501,7 @@ POST https://httpbin.org
 
         // method and URL and http version
         let FileParseResult { mut requests, errs } =
-            Parser::parse("GET /api/v1/user?show_all=true&limit=10    HTTP/1.1")
-                .unwrap()
-                .unwrap();
+            Parser::parse("GET /api/v1/user?show_all=true&limit=10    HTTP/1.1", false);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
@@ -1440,7 +1540,7 @@ GET https://test.com:8080
     &value=test
 
         "#####;
-        let FileParseResult { mut requests, errs } = Parser::parse(str).unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1468,7 +1568,7 @@ https://test.com:8080
     &value=test
 
         "#####;
-        let FileParseResult { mut requests, errs } = Parser::parse(str).unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1496,7 +1596,7 @@ GET https://test.com:8080
     &value=test HTTP/2.1
 
         "#####;
-        let FileParseResult { mut requests, errs } = Parser::parse(str).unwrap().unwrap();
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1562,9 +1662,7 @@ Content-Disposition: form-data; name="part1_name"
 ----test_boundary--
 "####;
 
-        let FileParseResult { mut requests, errs } = Parser::parse(str)
-            .expect("Parsing should be successful")
-            .expect("There should be a parsed request");
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1612,9 +1710,7 @@ more content
 ----test.?)()test--
 "####;
 
-        let FileParseResult { mut requests, errs } = Parser::parse(str)
-            .expect("Parsing should be successful")
-            .expect("There should be a parsed request");
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1669,9 +1765,7 @@ Content-Type: application/json
 --WebAppBoundary--
         "#####;
 
-        let FileParseResult { mut requests, errs } = Parser::parse(str)
-            .expect("Parsing should be successful")
-            .expect("There should be a parsed request");
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
 
@@ -1733,9 +1827,7 @@ H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRA
 --/////////////////////////////--
         "#####;
 
-        let FileParseResult { mut requests, errs } = Parser::parse(str)
-            .expect("Parsing should be successful")
-            .expect("There should be a parsed request");
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
@@ -1790,9 +1882,7 @@ Content-Type: application/json
     "key": "my-dev-value"
 }"#####;
 
-        let FileParseResult { mut requests, errs } = Parser::parse(str)
-            .expect("Parsing should be successful")
-            .expect("There should be a parsed request");
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
 
@@ -1829,9 +1919,7 @@ Content-Type: application/json
 
         "#####;
 
-        let FileParseResult { mut requests, errs } = Parser::parse(str)
-            .expect("Parsing should be successful")
-            .expect("There should be a parsed request");
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
 
@@ -1868,9 +1956,7 @@ GET https://example.com
 ###
         "#####;
 
-        let FileParseResult { requests, errs } = Parser::parse(str)
-            .expect("Parsing should be successful")
-            .expect("There should be a parsed request");
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 3);
 
@@ -1952,9 +2038,7 @@ GET https://example.com
 # @use-os-credentials
 GET https://httpbin.org
 "#####;
-        let FileParseResult { requests, errs } = Parser::parse(str)
-            .expect("should parse result without error")
-            .expect("should return request");
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         assert_eq!(
@@ -1993,9 +2077,7 @@ GET https://httpbin.org
 // @no-log
 GET https://httpbin.org
 "#####;
-        let FileParseResult { requests, errs } = Parser::parse(str)
-            .expect("should parse result without error")
-            .expect("should return request");
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         assert_eq!(
@@ -2058,9 +2140,7 @@ GET https://httpbin.org
     request.variables.set("hash", hash)
 "#####;
 
-        let FileParseResult { requests, errs } = Parser::parse(str)
-            .expect("should parse result without error")
-            .expect("should return request");
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         assert_eq!(
@@ -2102,9 +2182,7 @@ GET https://httpbin.org
 
         let response_handler_script = r#####" client.global.set("my_cookie", response.headers.valuesOf("Set-Cookie")[0]); "#####;
 
-        let FileParseResult { requests, errs } = Parser::parse(str)
-            .expect("should parse result without error")
-            .expect("should return request");
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         assert_eq!(
@@ -2151,9 +2229,7 @@ GET https://httpbin.org
     client.global.set("my_cookie_2", response.headers.valuesOf("Set-Cookie")[0]);
 "#####;
 
-        let FileParseResult { requests, errs } = Parser::parse(str)
-            .expect("should parse result without error")
-            .expect("should return request");
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         assert_eq!(
