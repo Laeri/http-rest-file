@@ -26,7 +26,7 @@ impl From<regex::Error> for ScanError {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(Eq, Debug, PartialOrd, Clone)]
 pub struct ScannerPos {
     cursor: usize,
 }
@@ -34,6 +34,24 @@ pub struct ScannerPos {
 impl From<ScannerPos> for usize {
     fn from(value: ScannerPos) -> Self {
         value.cursor
+    }
+}
+
+impl PartialEq for ScannerPos {
+    fn eq(&self, other: &Self) -> bool {
+        return self.cursor == other.cursor;
+    }
+}
+
+impl Ord for ScannerPos {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.cursor > other.cursor {
+            std::cmp::Ordering::Greater
+        } else if self.cursor < other.cursor {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Equal
+        }
     }
 }
 
@@ -127,10 +145,10 @@ impl Scanner {
 
     pub fn get_from_to<S: Into<usize>, E: Into<usize>>(&self, start: S, end: E) -> String {
         let start: usize = start.into();
-        let mut end = end.into();
-        if end >= self.cursor {
-            end = self.cursor;
-        }
+        let end = end.into();
+        if start == end {
+            return String::new();
+        } 
         self.characters[start..end].iter().collect::<String>()
     }
 
@@ -238,7 +256,6 @@ impl Scanner {
 
         let matches_str = loop {
             if sequence_cursor >= seq_len {
-                self.cursor = peek_cursor;
                 break true;
             }
             if peek_cursor >= end_index {
@@ -341,7 +358,7 @@ impl Scanner {
         };
 
         // skip \n character
-        if peek_cursor <= num_chars {
+        if peek_cursor < num_chars {
             peek_cursor += 1;
         }
 
@@ -437,12 +454,73 @@ impl Scanner {
             }
         }
     }
+
+    /// Return the previous line's bounds (start and end position)
+    fn get_prev_line_bounds(&self) -> Option<(usize, usize)> {
+        if self.cursor == 0 {
+            return None;
+        }
+        let mut line_end = self.cursor - 1;
+        loop {
+            println!("END {}", line_end);
+            // no previous line found
+            if line_end == 0 {
+                return None;
+            }
+            // found marker for previous line
+            if self.characters[line_end] == '\n' {
+                break;
+            }
+
+            line_end -= 1;
+        }
+
+        let mut line_start = line_end - 1;
+        loop {
+            println!("START {}", line_start);
+            if line_start == 0 {
+                break;
+            }
+            if self.characters[line_start] == '\n' {
+                // we found the previous line but move cursor after newline character
+                line_start += 1;
+                break;
+            }
+            line_start -= 1;
+        }
+        if line_start > line_end {
+            line_start = line_end;
+        }
+
+        Some(dbg!((line_start, line_end)))
+    }
+
+    /// Return the previous line without moving the cursor position
+    pub fn get_prev_line(&self) -> Option<String> {
+        let (line_start, line_end) = self.get_prev_line_bounds()?;
+        if line_start == line_end {
+            return Some("".to_string());
+        }
+        return Some(
+            self.characters[line_start..line_end]
+                .iter()
+                .collect::<String>(),
+        );
+    }
+
+    /// Change the position to the start of the new line if exists, otherwise do nothing
+    pub fn step_to_previous_line_start(&mut self) {
+        if let Some((line_start, _)) = self.get_prev_line_bounds() {
+            self.cursor = line_start;
+        }
+    }
 }
 
 // only for debugging
 #[cfg(debug_assertions)]
 impl Scanner {
     pub fn debug_string(&self) -> String {
+        println!("LEN: {}, cursor: {}", self.characters.len(), self.cursor);
         let before: String = self.characters[..self.cursor].iter().collect();
 
         let current: String = self
@@ -703,5 +781,17 @@ mod tests {
         matches = scanner.match_regex_forward("\n(\t\r)\n ").unwrap().unwrap();
 
         assert_eq!(matches, ["\t\r".to_string()]);
+    }
+
+    #[test]
+    pub fn get_prev_line_bounds() {
+        let string = "abc\ndef\n\n\n";
+        let mut scanner = Scanner::new(string);
+        assert_eq!(scanner.get_prev_line_bounds(), None);
+
+        scanner.skip_to_next_line();
+        assert_eq!(scanner.get_prev_line_bounds(), Some((0,3)));
+        scanner.skip_to_next_line();
+        assert_eq!(scanner.get_prev_line_bounds(), Some((4,7)));
     }
 }

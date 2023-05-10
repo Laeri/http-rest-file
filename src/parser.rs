@@ -169,7 +169,7 @@ impl Parser {
                 (
                     Some(model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: HttpMethod::GET,
+                        method: None,
                         http_version: None,
                     }),
                     None,
@@ -182,7 +182,7 @@ impl Parser {
                 (
                     Some(model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: Parser::match_request_method(method),
+                        method: Some(Parser::match_request_method(method)),
                         http_version: None,
                     }),
                     None,
@@ -201,7 +201,7 @@ impl Parser {
                 (
                     Some(model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: Parser::match_request_method(method),
+                        method: Some(Parser::match_request_method(method)),
                         http_version,
                     }),
                     err,
@@ -232,7 +232,7 @@ impl Parser {
                 (
                     Some(model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: Parser::match_request_method(method),
+                        method: Some(Parser::match_request_method(method)),
                         http_version,
                     }),
                     Some(ParseErrorType::TooManyElementsOnRequestLine(format!(
@@ -601,16 +601,37 @@ You have additional elements: '{}'",
 
                 // response handler
                 if peek_line.starts_with(">") {
+                    // if previous line is empty then do not parse it as body before response
+                    // handler, when serializing we put an additional new line for clarity that
+                    // should not be part of the body
+                    if scanner
+                        .get_prev_line()
+                        .map_or(false, |l| l.trim().is_empty())
+                    {
+                        scanner.step_to_previous_line_start();
+                    }
                     break;
                 }
 
-                // output handler also ends body
+                // output handler / redirect also ends body
                 if peek_line.starts_with(">>") {
+                    // if previous line is empty then do not parse it as body before redirect
+                    // when serializing we add an additional newline before the redirect for
+                    // clarity which should not be part of the body
+                    if scanner
+                        .get_prev_line()
+                        .map_or(false, |l| l.trim().is_empty())
+                    {
+                        scanner.step_to_previous_line_start();
+                    }
                     break;
                 }
                 scanner.skip_to_next_line();
             }
-            let end_pos = scanner.get_pos();
+            let mut end_pos = scanner.get_pos();
+            if start_pos > end_pos {
+                end_pos = start_pos.clone();
+            }
             let body_str = scanner.get_from_to(start_pos, end_pos);
             if body_str.trim().starts_with('<') {
                 let path = body_str.split('<').nth(1).unwrap().trim();
@@ -619,7 +640,9 @@ You have additional elements: '{}'",
                 };
             } else if !body_str.is_empty() {
                 body = model::RequestBody::Text {
-                    data: DataSource::Raw(body_str),
+                    // We trim trailing newlines, jetbrains client does the same
+                    // However, this means a text body cannot contain trailing newlines @TODO
+                    data: DataSource::Raw(body_str.trim_end_matches("\n").to_string()),
                 };
             }
         }
@@ -628,14 +651,21 @@ You have additional elements: '{}'",
 
     pub fn parse_pre_request_script(
         scanner: &mut Scanner,
-    ) -> Result<Option<String>, ParseErrorType> {
+    ) -> Result<Option<model::PreRequestScript>, ParseErrorType> {
         if !scanner.match_str_forward("<") {
             return Ok(None);
         };
         scanner.skip_ws();
         if !scanner.match_str_forward("{%") {
-            let msg = "Expected pre request starting characters '{%' after a matchin '<' above the request".to_string();
-            return Err(ParseErrorType::InvalidPreRequestScript(msg));
+            // if no starting script is found then a handler script should be presnet
+            let line = scanner.get_line_and_advance();
+            if line.is_none() {
+                let msg = "Expected pre request starting characters '{%' after a matching '<', or a filepath to a handler script above the request.".to_string();
+                return Err(ParseErrorType::InvalidPreRequestScript(msg));
+            }
+            return Ok(Some(model::PreRequestScript::FromFilepath(
+                line.unwrap().trim().to_string(),
+            )));
         }
 
         let mut found: bool = false;
@@ -666,12 +696,13 @@ You have additional elements: '{}'",
             return Err(ParseErrorType::InvalidPreRequestScript(msg));
         }
         scanner.skip_to_next_line();
-        Ok(Some(lines.join("\n")))
+        Ok(Some(model::PreRequestScript::Script(lines.join("\n"))))
     }
 
     pub fn parse_response_handler(
         scanner: &mut Scanner,
     ) -> Result<Option<model::ResponseHandler>, ParseErrorType> {
+        scanner.skip_empty_lines();
         scanner.skip_ws();
         if !scanner.match_str_forward(">") {
             return Ok(None);
@@ -708,21 +739,20 @@ You have additional elements: '{}'",
 
             return Ok(Some(ResponseHandler::Script(lines.join("\n"))));
         } else {
-            // then a path
-            if let Ok(Some(matches)) = scanner.match_regex_forward("([^\\s])+") {
-                if matches.is_empty() {
-                    let msg = "Invalid response handler, expect either a path to a handlerscript after '>' or a handler script {% %} but neither has been found.";
-                    return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
-                }
-                return Ok(Some(ResponseHandler::FromFilepath(matches[0].to_string())));
-            } else {
+            let path = scanner.get_line_and_advance();
+            if path.is_none() || path.as_ref().unwrap().is_empty() {
                 let msg = "Invalid response handler, expect either a path to a handlerscript after '>' or a handler script {% %} but neither has been found.";
                 return Err(ParseErrorType::InvalidResponseHandler(msg.to_string()));
             }
+
+            return Ok(Some(ResponseHandler::FromFilepath(
+                path.unwrap().trim().to_string(),
+            )));
         }
     }
 
     pub fn parse_redirect(scanner: &mut Scanner) -> Result<Option<Redirect>, ParseErrorType> {
+        scanner.skip_empty_lines();
         if !scanner.match_str_forward(">>") {
             return Ok(None);
         }
@@ -740,7 +770,7 @@ You have additional elements: '{}'",
             ));
         }
 
-        let path = path.unwrap();
+        let path = path.unwrap().trim().to_string();
 
         if rewrite {
             return Ok(Some(Redirect::RewriteFile(path)));
@@ -756,7 +786,7 @@ You have additional elements: '{}'",
         let mut name: Option<String> = None;
         let mut parse_errs: Vec<ParseErrorType> = Vec::new();
         let mut request_settings = RequestSettings::default();
-        let mut pre_request_script = None;
+        let mut pre_request_script: Option<model::PreRequestScript> = None;
 
         scanner.skip_empty_lines();
 
@@ -943,7 +973,7 @@ https://httpbin.org
             name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: HttpMethod::GET,
+                method: None,
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
@@ -977,7 +1007,7 @@ https://httpbin.org
             name: Some("test name".to_string()),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: HttpMethod::GET,
+                method: None,
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
@@ -1042,7 +1072,7 @@ CUSTOMVERB https://httpbin.org
             name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: HttpMethod::CUSTOM("CUSTOMVERB".to_string()),
+                method: Some(HttpMethod::CUSTOM("CUSTOMVERB".to_string())),
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
@@ -1076,7 +1106,7 @@ POST https://httpbin.org
             name: Some("test name".to_string()),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: HttpMethod::POST,
+                method: Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
@@ -1110,7 +1140,7 @@ POST https://httpbin.org
             name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: HttpMethod::POST,
+                method: Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: None,
             },
@@ -1184,7 +1214,7 @@ POST https://httpbin.org
         let request = requests.remove(0);
 
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
         assert_eq!(request.request_line.http_version, None);
         assert_eq!(errs, vec![]);
 
@@ -1196,7 +1226,7 @@ POST https://httpbin.org
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
         assert_eq!(
             request.request_line.method,
-            HttpMethod::CUSTOM(String::from("CUSTOMMETHOD"))
+            Some(HttpMethod::CUSTOM(String::from("CUSTOMMETHOD")))
         );
         assert_eq!(
             request.request_line.http_version,
@@ -1251,8 +1281,9 @@ POST https://httpbin.org
                 .unwrap()
                 .unwrap();
         assert_eq!(requests.len(), 1);
+        let request = &requests[0];
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
         assert_eq!(request.request_line.http_version, None);
         assert_eq!(errs, vec![]);
 
@@ -1264,7 +1295,7 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
         assert_eq!(
             request.request_line.http_version,
             Some(model::HttpVersion { major: 1, minor: 1 })
@@ -1362,7 +1393,7 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
         assert_eq!(request.request_line.http_version, None);
         assert_eq!(errs, vec![]);
 
@@ -1374,7 +1405,7 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
         assert_eq!(
             request.request_line.http_version,
             Some(model::HttpVersion { major: 1, minor: 1 })
@@ -1424,7 +1455,7 @@ GET https://test.com:8080
             }
         );
         assert_eq!(request.request_line.http_version, None);
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
     }
 
     #[test]
@@ -1452,7 +1483,7 @@ https://test.com:8080
             }
         );
         assert_eq!(request.request_line.http_version, None);
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, None);
     }
 
     #[test]
@@ -1483,7 +1514,7 @@ GET https://test.com:8080
             request.request_line.http_version,
             Some(HttpVersion { major: 2, minor: 1 })
         );
-        assert_eq!(request.request_line.method, HttpMethod::GET);
+        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
     }
 
     #[test]
@@ -1859,7 +1890,7 @@ GET https://example.com
                     },
                     request_line: model::RequestLine {
                         http_version: None,
-                        method: HttpMethod::POST,
+                        method: Some(HttpMethod::POST),
                         target: model::RequestTarget::Absolute {
                             uri: "http://example.com/api/add".parse::<Uri>().unwrap(),
                             string: "http://example.com/api/add".to_string()
@@ -1877,7 +1908,7 @@ GET https://example.com
                     body: model::RequestBody::None,
                     request_line: model::RequestLine {
                         http_version: None,
-                        method: HttpMethod::GET,
+                        method: Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
                             uri: "https://example.com".parse::<Uri>().unwrap(),
                             string: "https://example.com".to_string()
@@ -1895,7 +1926,7 @@ GET https://example.com
                     body: model::RequestBody::None,
                     request_line: model::RequestLine {
                         http_version: None,
-                        method: HttpMethod::GET,
+                        method: Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
                             uri: "https://example.com".parse::<Uri>().unwrap(),
                             string: "https://example.com".to_string()
@@ -1942,7 +1973,7 @@ GET https://httpbin.org
                     use_os_credentials: Some(true),
                 },
                 request_line: RequestLine {
-                    method: HttpMethod::GET,
+                    method: Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
                     http_version: None
                 },
@@ -1980,14 +2011,14 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: HttpMethod::GET,
+                    method: Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
                     http_version: None
                 },
                 body: model::RequestBody::None,
-                pre_request_script: Some(
+                pre_request_script: Some(model::PreRequestScript::Script(
                     r#"     request.variables.set("firstname", "John") "#.to_string()
-                ),
+                )),
                 response_handler: None,
                 redirect: None
             }
@@ -2045,12 +2076,14 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: HttpMethod::GET,
+                    method: Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
                     http_version: None
                 },
                 body: model::RequestBody::None,
-                pre_request_script: Some(pre_request_script.to_string()),
+                pre_request_script: Some(model::PreRequestScript::Script(
+                    pre_request_script.to_string()
+                )),
                 response_handler: None,
                 redirect: None,
             }
@@ -2087,7 +2120,7 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: HttpMethod::GET,
+                    method: Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
                     http_version: None
                 },
@@ -2136,7 +2169,7 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: HttpMethod::GET,
+                    method: Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
                     http_version: None
                 },

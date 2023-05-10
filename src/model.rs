@@ -1,4 +1,3 @@
-
 #[derive(PartialEq, Debug, Clone)]
 pub enum ParseErrorType {
     // General error
@@ -27,7 +26,7 @@ pub enum ParseErrorType {
     // pre request scripts < {% %}
     InvalidPreRequestScript(String),
 
-    // response handler '> <path>' or '> {% <your_script> %}' is not valid 
+    // response handler '> <path>' or '> {% <your_script> %}' is not valid
     InvalidResponseHandler(String),
 
     // redirect to file requires a path
@@ -47,6 +46,24 @@ pub enum HttpMethod {
     OPTIONS,
     CONNECT,
     CUSTOM(String),
+}
+
+impl ToString for HttpMethod {
+    fn to_string(&self) -> String {
+        let result = match self {
+            HttpMethod::GET => "GET",
+            HttpMethod::POST => "POST",
+            HttpMethod::PUT => "PUT",
+            HttpMethod::PATCH => "PATCH",
+            HttpMethod::DELETE => "DELETE",
+            HttpMethod::HEAD => "HEAD",
+            HttpMethod::TRACE => "TRACE",
+            HttpMethod::OPTIONS => "OPTIONS",
+            HttpMethod::CONNECT => "CONNECT",
+            HttpMethod::CUSTOM(string) => &string,
+        };
+        result.to_string()
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -96,6 +113,23 @@ impl RequestSettings {
             SettingsEntry::NameEntry(_name) => (),
         }
     }
+
+    pub fn serialized(&self) -> String {
+        let mut result = String::new();
+        if let Some(true) = self.no_redirect {
+            result.push_str("# @no-redirect\n");
+        }
+        if let Some(true) = self.no_log {
+            result.push_str("# @no-log\n");
+        }
+        if let Some(true) = self.no_cookie_jar {
+            result.push_str("# @no-cookie-jar\n");
+        }
+        if let Some(true) = self.use_os_credentials {
+            result.push_str("# @use-os-credentials\n");
+        }
+        result
+    }
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -118,6 +152,15 @@ pub enum DataSource<T> {
     FromFilepath(T),
 }
 
+impl ToString for DataSource<String> {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Raw(str) => str.to_string(),
+            Self::FromFilepath(path) => format!("< {}", path),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestBody {
     None,
@@ -129,6 +172,60 @@ pub enum RequestBody {
     Text {
         data: DataSource<String>,
     },
+}
+
+impl RequestBody {
+    pub fn is_present(&self) -> bool {
+        if let RequestBody::None = self {
+            return false;
+        }
+        true
+    }
+}
+
+impl ToString for RequestBody {
+    fn to_string(&self) -> String {
+        match self {
+            RequestBody::None => "".to_string(),
+            RequestBody::Multipart { boundary, parts } => {
+                let mut multipart_res = String::new();
+
+                // TODO
+                for part in parts.iter() {
+                    multipart_res.push_str(&format!("--{}\n", boundary));
+                    multipart_res.push_str(&format!(
+                        "Content-Disposition: form-data; name=\"{}\"",
+                        part.name
+                    ));
+                    let fields_string = part
+                        .fields
+                        .iter()
+                        .map(|field| format!("{}=\"{}\"", field.key, field.value))
+                        .collect::<Vec<String>>()
+                        .join(";");
+                    if !fields_string.is_empty() {
+                        multipart_res.push_str("; ");
+                    }
+                    multipart_res.push_str(&fields_string);
+                    multipart_res.push('\n');
+                    for header in part.headers.iter() {
+                        multipart_res.push_str(&format!("{}: {}", header.key, header.value));
+                        multipart_res.push('\n');
+                    }
+                    multipart_res.push('\n');
+                    let content = match part.data {
+                        DataSource::Raw(ref str) => str.to_string(),
+                        DataSource::FromFilepath(ref path) => format!("< {}", path),
+                    };
+                    multipart_res.push_str(&content);
+                    multipart_res.push('\n');
+                }
+                multipart_res.push_str(&format!("--{}--", boundary));
+                return multipart_res;
+            }
+            RequestBody::Text { data } => data.to_string(),
+        }
+    }
 }
 
 impl RequestTarget {
@@ -202,6 +299,12 @@ impl Header {
     }
 }
 
+impl ToString for Header {
+    fn to_string(&self) -> String {
+        format!("{}: {}", self.key, self.value)
+    }
+}
+
 #[derive(PartialEq, Debug)]
 pub enum HttpRestFileExtension {
     Http,
@@ -216,15 +319,38 @@ pub struct HttpRestFile {
 }
 
 #[derive(PartialEq, Debug, Clone)]
+pub enum PreRequestScript {
+    FromFilepath(String),
+    Script(String),
+}
+
+impl ToString for PreRequestScript {
+    fn to_string(&self) -> String {
+        match self {
+            PreRequestScript::FromFilepath(path) => format!("< {}", path),
+            PreRequestScript::Script(script) => {
+                format!("< {{%{}%}}", script)
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Debug, Clone)]
 pub enum ResponseHandler {
     FromFilepath(String),
-    Script(String)
+    Script(String),
 }
 
 #[derive(PartialEq, Debug, Clone)]
 pub enum Redirect {
     NewFileIfExists(String),
-    RewriteFile(String)
+    RewriteFile(String),
+}
+
+#[derive(PartialEq, Debug)]
+pub struct RequestFile {
+    pub path: String,
+    pub requests: Vec<Request>,
 }
 
 #[derive(PartialEq, Debug)]
@@ -235,9 +361,9 @@ pub struct Request {
     pub headers: Vec<Header>,
     pub body: RequestBody,
     pub settings: RequestSettings,
-    pub pre_request_script: Option<String>,
+    pub pre_request_script: Option<PreRequestScript>,
     pub response_handler: Option<ResponseHandler>,
-    pub redirect: Option<Redirect>
+    pub redirect: Option<Redirect>,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -283,11 +409,11 @@ pub struct Comment {
 
 impl ToString for Comment {
     fn to_string(&self) -> String {
-       match self.kind {
+        match self.kind {
             CommentKind::SingleTag => format!("# {}", self.value),
             CommentKind::DoubleSlash => format!("// {}", self.value),
-            CommentKind::RequestSeparator => format!("### {}", self.value)
-        } 
+            CommentKind::RequestSeparator => format!("### {}", self.value),
+        }
     }
 }
 
@@ -336,19 +462,32 @@ impl From<&str> for RequestTarget {
 
 #[derive(PartialEq, Debug)]
 pub struct RequestLine {
-    pub method: HttpMethod,
+    pub method: Option<HttpMethod>,
     pub target: RequestTarget,
     pub http_version: Option<HttpVersion>, // @TODO: use enum and validate
 }
 
 impl RequestTarget {}
+
 impl Default for RequestLine {
     fn default() -> RequestLine {
         RequestLine {
-            method: HttpMethod::GET,
+            method: Some(HttpMethod::GET),
             target: RequestTarget::from(""),
             http_version: None,
         }
+    }
+}
+
+impl ToString for RequestTarget {
+    fn to_string(&self) -> String {
+        match self {
+            RequestTarget::Asterisk => "*",
+            RequestTarget::Absolute { string, .. } => string,
+            RequestTarget::RelativeOrigin { string, .. } => string,
+            RequestTarget::InvalidTarget(target) => target,
+        }
+        .to_string()
     }
 }
 
@@ -367,7 +506,3 @@ pub struct FileParseResult {
     pub requests: Vec<Request>,
     pub errs: Vec<ParseErrorType>,
 }
-
-
-
-
