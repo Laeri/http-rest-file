@@ -1,4 +1,4 @@
-use crate::model::{self, CommentKind, RequestFile, ResponseHandler};
+use crate::model::{self, CommentKind, RequestFile, ResponseHandler, WithDefault};
 
 #[derive(PartialEq, Debug, Clone)]
 pub enum SerializeError {
@@ -69,13 +69,13 @@ impl Serializer {
         }
 
         // @TODO Option type for method
-        if let Some(method) = &request.request_line.method {
+        if let WithDefault::Some(method) = &request.request_line.method {
             result.push_str(&method.to_string());
             result.push(' ');
         }
         result.push_str(&request.request_line.target.to_string());
 
-        if let Some(ref http_version) = request.request_line.http_version {
+        if let WithDefault::Some(ref http_version) = request.request_line.http_version {
             result.push(' ');
             result.push_str(&http_version.to_string());
         }
@@ -141,9 +141,9 @@ mod tests {
                 use_os_credentials: Some(true),
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::GET),
+                method: WithDefault::Some(HttpMethod::GET),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             body: RequestBody::None,
             pre_request_script: None,
@@ -175,9 +175,9 @@ GET https://httpbin.org";
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: None,
+                method: WithDefault::default(),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             body: RequestBody::None,
             pre_request_script: None,
@@ -203,9 +203,9 @@ GET https://httpbin.org";
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::GET),
+                method: WithDefault::Some(HttpMethod::GET),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             body: RequestBody::None,
             pre_request_script: None,
@@ -231,9 +231,9 @@ GET https://httpbin.org";
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::GET),
+                method: WithDefault::Some(HttpMethod::GET),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: Some(HttpVersion { major: 1, minor: 1 }),
+                http_version: WithDefault::Some(HttpVersion { major: 1, minor: 1 }),
             },
             body: RequestBody::None,
             pre_request_script: None,
@@ -259,9 +259,9 @@ GET https://httpbin.org";
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::CUSTOM("CustomMethod".to_string())),
+                method: WithDefault::Some(HttpMethod::CUSTOM("CustomMethod".to_string())),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: Some(HttpVersion { major: 2, minor: 1 }),
+                http_version: WithDefault::Some(HttpVersion { major: 2, minor: 1 }),
             },
             body: RequestBody::None,
             pre_request_script: None,
@@ -286,9 +286,9 @@ GET https://httpbin.org";
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             body: RequestBody::Text {
                 data: DataSource::Raw(
@@ -364,9 +364,9 @@ Content-Type: application/json
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             body: RequestBody::Text {
                 data: DataSource::Raw("< /path/to/file.json".to_string()),
@@ -397,9 +397,9 @@ Content-Type: application/json
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             body: RequestBody::Text {
                 data: DataSource::Raw("< /path/to/file.json".to_string()),
@@ -437,9 +437,9 @@ Header::new("Cache-Control", "max-age=3600")
                 use_os_credentials: None,
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             body: RequestBody::None,
             pre_request_script: None,
@@ -479,9 +479,9 @@ comments: vec![Comment {
                 use_os_credentials: Some(true),
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
-                http_version: Some(HttpVersion { major: 2, minor: 1 }),
+                http_version: WithDefault::Some(HttpVersion { major: 2, minor: 1 }),
             },
             body: RequestBody::Text { data: DataSource::Raw(r####"{
   "name": "John Doe",
@@ -586,9 +586,9 @@ comments: vec![Comment {
                 use_os_credentials: Some(true),
             },
             request_line: RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
-                http_version: Some(HttpVersion { major: 2, minor: 1 }),
+                http_version: WithDefault::Some(HttpVersion { major: 2, minor: 1 }),
             },
             body: model::RequestBody::Multipart {
                 boundary: "WebAppBoundary".to_string(),

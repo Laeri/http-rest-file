@@ -80,6 +80,98 @@ impl ParseError {
     }
 }
 
+#[allow(dead_code)]
+pub enum WithDefault<T: std::fmt::Debug> {
+    Some(T),
+    Default(T),
+    DefaultFn(Box<dyn Fn() -> T>),
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for WithDefault<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WithDefault::Some(value) => f.debug_tuple("Some").field(value).finish(),
+            WithDefault::Default(value) => f.debug_tuple("Default").field(value).finish(),
+            WithDefault::DefaultFn(fun) => {
+                let result = fun();
+                let type_name = std::any::type_name::<T>();
+                f.debug_tuple("DefaultFn")
+                    .field(&format_args!("{}: {:?}", type_name, result))
+                    .finish()
+            }
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> WithDefault<T> {
+    #[allow(dead_code)]
+    fn default_fn(f: Box<dyn Fn() -> T>) -> Self {
+        WithDefault::DefaultFn(f)
+    }
+}
+
+impl<T: std::fmt::Debug> From<Option<T>> for WithDefault<T>
+where
+    WithDefault<T>: Default,
+{
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(t) => WithDefault::Some(t),
+            _ => WithDefault::default(),
+        }
+    }
+}
+
+impl<T> Default for WithDefault<T>
+where
+    T: Default + std::fmt::Debug,
+{
+    fn default() -> Self {
+        WithDefault::Default(T::default())
+    }
+}
+
+impl Default for WithDefault<HttpVersion> {
+    fn default() -> Self {
+        WithDefault::Default(HttpVersion { major: 1, minor: 1 })
+    }
+}
+
+impl Default for WithDefault<HttpMethod> {
+    fn default() -> Self {
+        WithDefault::Default(HttpMethod::GET)
+    }
+}
+
+impl<T: std::fmt::Debug> WithDefault<T> {
+    #[allow(dead_code)]
+    pub fn is_default(&self) -> bool {
+        !matches!(self, WithDefault::Some(_))
+    }
+
+    #[allow(dead_code)]
+    pub fn get_or_default(self) -> T {
+        match self {
+            WithDefault::Some(value) => value,
+            WithDefault::Default(default) => default,
+            WithDefault::DefaultFn(f) => f(),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug + std::cmp::PartialEq> PartialEq for WithDefault<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (WithDefault::Some(value), WithDefault::Some(other_value)) => value.eq(other_value),
+            (WithDefault::Default(value), WithDefault::Default(other_value)) => {
+                value.eq(other_value)
+            }
+            (WithDefault::DefaultFn(f), WithDefault::DefaultFn(f_other)) => (f()).eq(&f_other()),
+            _ => false,
+        }
+    }
+}
+
 #[derive(PartialEq, Debug)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum HttpMethod {
@@ -514,9 +606,9 @@ impl std::fmt::Display for HttpVersion {
 
 #[derive(PartialEq, Debug)]
 pub struct RequestLine {
-    pub method: Option<HttpMethod>,
+    pub method: WithDefault<HttpMethod>,
     pub target: RequestTarget,
-    pub http_version: Option<HttpVersion>, // @TODO: use enum and validate
+    pub http_version: WithDefault<HttpVersion>, // @TODO: use enum and validate
 }
 
 impl From<&str> for RequestTarget {
@@ -533,9 +625,9 @@ impl From<&str> for RequestTarget {
 impl Default for RequestLine {
     fn default() -> RequestLine {
         RequestLine {
-            method: Some(HttpMethod::GET),
+            method: WithDefault::Default(HttpMethod::GET),
             target: RequestTarget::from(""),
-            http_version: None,
+            http_version: WithDefault::Default(HttpVersion { major: 1, minor: 1 }),
         }
     }
 }
@@ -567,4 +659,46 @@ impl Request {
 pub struct FileParseResult {
     pub requests: Vec<Request>,
     pub errs: Vec<ParseError>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    pub fn test_with_default() {
+        assert_eq!(
+            WithDefault::<HttpVersion>::default(),
+            WithDefault::<HttpVersion>::default()
+        );
+
+        assert_eq!(
+            WithDefault::<HttpMethod>::default(),
+            WithDefault::<HttpMethod>::default()
+        );
+
+        assert_eq!(
+            WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 2, minor: 1 })),
+            WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 2, minor: 1 }))
+        );
+
+        assert_eq!(
+            WithDefault::Some(HttpMethod::CUSTOM("CustomVerb".to_string())),
+            WithDefault::Some(HttpMethod::CUSTOM("CustomVerb".to_string()))
+        );
+
+        assert!(WithDefault::<HttpVersion>::default().is_default());
+        assert_eq!(
+            WithDefault::Some(HttpVersion { major: 1, minor: 1 }).is_default(),
+            false
+        );
+        assert!(WithDefault::default_fn(Box::new(|| 1)).is_default());
+        assert!(
+            WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 1, minor: 1 })).is_default()
+        );
+
+        assert_eq!(WithDefault::Some(1).get_or_default(), 1);
+        assert_eq!(WithDefault::Default(1).get_or_default(), 1);
+        assert_eq!(WithDefault::DefaultFn(Box::new(|| 1)).get_or_default(), 1);
+    }
 }

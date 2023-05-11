@@ -1,4 +1,4 @@
-use self::model::{Multipart, RequestTarget};
+use self::model::{Multipart, RequestTarget, WithDefault};
 pub use crate::scanner::Scanner;
 use crate::{
     model,
@@ -160,8 +160,8 @@ impl Parser {
                 (
                     model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: None,
-                        http_version: None,
+                        method: model::WithDefault::default(),
+                        http_version: model::WithDefault::default(),
                     },
                     None,
                 )
@@ -173,8 +173,8 @@ impl Parser {
                 (
                     model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: Some(Parser::match_request_method(method)),
-                        http_version: None,
+                        method: WithDefault::Some(Parser::match_request_method(method)),
+                        http_version: WithDefault::default(),
                     },
                     None,
                 )
@@ -183,8 +183,8 @@ impl Parser {
             [method, target_str, http_version_str] => {
                 let result = model::HttpVersion::from_str(http_version_str);
                 let (http_version, http_version_err) = match result {
-                    Ok(version) => (Some(version), None),
-                    Err(err) => (None, Some(err)),
+                    Ok(version) => (WithDefault::Some(version), None),
+                    Err(err) => (WithDefault::default(), Some(err)),
                 };
 
                 // @TODO: why can't we pass target_str or &(*target_str) directly?
@@ -192,7 +192,7 @@ impl Parser {
                 (
                     model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: Some(Parser::match_request_method(method)),
+                        method: WithDefault::Some(Parser::match_request_method(method)),
                         http_version,
                     },
                     http_version_err,
@@ -223,8 +223,8 @@ impl Parser {
                 (
                     model::RequestLine {
                         target: RequestTarget::from(str),
-                        method: Some(Parser::match_request_method(method)),
-                        http_version,
+                        method: WithDefault::Some(Parser::match_request_method(method)),
+                        http_version: WithDefault::from(http_version),
                     },
                     Some(ParseError::new_with_position(
                         ParseErrorKind::TooManyElementsOnRequestLine,
@@ -1112,9 +1112,9 @@ https://httpbin.org
             name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: None,
+                method: WithDefault::default(),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
@@ -1141,9 +1141,9 @@ https://httpbin.org
             name: Some("test name".to_string()),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: None,
+                method: WithDefault::default(),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
@@ -1201,9 +1201,9 @@ CUSTOMVERB https://httpbin.org
             name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: Some(HttpMethod::CUSTOM("CUSTOMVERB".to_string())),
+                method: WithDefault::Some(HttpMethod::CUSTOM("CUSTOMVERB".to_string())),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
@@ -1230,9 +1230,9 @@ POST https://httpbin.org
             name: Some("test name".to_string()),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
@@ -1259,9 +1259,9 @@ POST https://httpbin.org
             name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: Some(HttpMethod::POST),
+                method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org"),
-                http_version: None,
+                http_version: WithDefault::default(),
             },
             headers: Vec::new(),
             body: model::RequestBody::None,
@@ -1323,8 +1323,11 @@ POST https://httpbin.org
         let request = requests.remove(0);
 
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
-        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
-        assert_eq!(request.request_line.http_version, None);
+        assert_eq!(
+            request.request_line.method,
+            WithDefault::Some(HttpMethod::GET)
+        );
+        assert_eq!(request.request_line.http_version, WithDefault::default());
         assert_eq!(errs, vec![]);
 
         let FileParseResult { mut requests, errs } =
@@ -1335,11 +1338,11 @@ POST https://httpbin.org
         assert_eq!(request.request_line.target, RequestTarget::Asterisk);
         assert_eq!(
             request.request_line.method,
-            Some(HttpMethod::CUSTOM(String::from("CUSTOMMETHOD")))
+            WithDefault::Some(HttpMethod::CUSTOM(String::from("CUSTOMMETHOD")))
         );
         assert_eq!(
             request.request_line.http_version,
-            Some(model::HttpVersion { major: 1, minor: 1 })
+            WithDefault::Some(model::HttpVersion { major: 1, minor: 1 })
         );
         assert_eq!(errs, vec![]);
     }
@@ -1390,8 +1393,11 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
-        assert_eq!(request.request_line.http_version, None);
+        assert_eq!(
+            request.request_line.method,
+            WithDefault::Some(HttpMethod::GET)
+        );
+        assert_eq!(request.request_line.http_version, WithDefault::default());
         assert_eq!(errs, vec![]);
 
         // method and URL and http version
@@ -1402,10 +1408,13 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
+        assert_eq!(
+            request.request_line.method,
+            WithDefault::Some(HttpMethod::GET)
+        );
         assert_eq!(
             request.request_line.http_version,
-            Some(model::HttpVersion { major: 1, minor: 1 })
+            WithDefault::Some(model::HttpVersion { major: 1, minor: 1 })
         );
         assert_eq!(errs, vec![]);
     }
@@ -1495,8 +1504,11 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
-        assert_eq!(request.request_line.http_version, None);
+        assert_eq!(
+            request.request_line.method,
+            WithDefault::Some(HttpMethod::GET)
+        );
+        assert_eq!(request.request_line.http_version, WithDefault::default());
         assert_eq!(errs, vec![]);
 
         // method and URL and http version
@@ -1505,10 +1517,13 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         assert_eq!(request.request_line.target, expected_target);
-        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
+        assert_eq!(
+            request.request_line.method,
+            WithDefault::Some(HttpMethod::GET)
+        );
         assert_eq!(
             request.request_line.http_version,
-            Some(model::HttpVersion { major: 1, minor: 1 })
+            WithDefault::Some(model::HttpVersion { major: 1, minor: 1 })
         );
         assert_eq!(errs, vec![]);
     }
@@ -1554,8 +1569,11 @@ GET https://test.com:8080
                 string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
             }
         );
-        assert_eq!(request.request_line.http_version, None);
-        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
+        assert_eq!(request.request_line.http_version, WithDefault::default());
+        assert_eq!(
+            request.request_line.method,
+            WithDefault::Some(HttpMethod::GET)
+        );
     }
 
     #[test]
@@ -1582,8 +1600,8 @@ https://test.com:8080
                 string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
             }
         );
-        assert_eq!(request.request_line.http_version, None);
-        assert_eq!(request.request_line.method, None);
+        assert_eq!(request.request_line.http_version, WithDefault::default());
+        assert_eq!(request.request_line.method, WithDefault::default());
     }
 
     #[test]
@@ -1612,9 +1630,12 @@ GET https://test.com:8080
         );
         assert_eq!(
             request.request_line.http_version,
-            Some(HttpVersion { major: 2, minor: 1 })
+            WithDefault::Some(HttpVersion { major: 2, minor: 1 })
         );
-        assert_eq!(request.request_line.method, Some(HttpMethod::GET));
+        assert_eq!(
+            request.request_line.method,
+            WithDefault::Some(HttpMethod::GET)
+        );
     }
 
     #[test]
@@ -1975,8 +1996,8 @@ GET https://example.com
                         data: DataSource::FromFilepath("./input.json".to_string())
                     },
                     request_line: model::RequestLine {
-                        http_version: None,
-                        method: Some(HttpMethod::POST),
+                        http_version: WithDefault::default(),
+                        method: WithDefault::Some(HttpMethod::POST),
                         target: model::RequestTarget::Absolute {
                             uri: "http://example.com/api/add".parse::<Uri>().unwrap(),
                             string: "http://example.com/api/add".to_string()
@@ -1993,8 +2014,8 @@ GET https://example.com
                     headers: vec![],
                     body: model::RequestBody::None,
                     request_line: model::RequestLine {
-                        http_version: None,
-                        method: Some(HttpMethod::GET),
+                        http_version: WithDefault::default(),
+                        method: WithDefault::Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
                             uri: "https://example.com".parse::<Uri>().unwrap(),
                             string: "https://example.com".to_string()
@@ -2011,8 +2032,8 @@ GET https://example.com
                     headers: vec![],
                     body: model::RequestBody::None,
                     request_line: model::RequestLine {
-                        http_version: None,
-                        method: Some(HttpMethod::GET),
+                        http_version: WithDefault::default(),
+                        method: WithDefault::Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
                             uri: "https://example.com".parse::<Uri>().unwrap(),
                             string: "https://example.com".to_string()
@@ -2057,9 +2078,9 @@ GET https://httpbin.org
                     use_os_credentials: Some(true),
                 },
                 request_line: RequestLine {
-                    method: Some(HttpMethod::GET),
+                    method: WithDefault::Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
-                    http_version: None
+                    http_version: WithDefault::default()
                 },
                 body: model::RequestBody::None,
                 pre_request_script: None,
@@ -2093,9 +2114,9 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: Some(HttpMethod::GET),
+                    method: WithDefault::Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
-                    http_version: None
+                    http_version: WithDefault::default()
                 },
                 body: model::RequestBody::None,
                 pre_request_script: Some(model::PreRequestScript::Script(
@@ -2156,9 +2177,9 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: Some(HttpMethod::GET),
+                    method: WithDefault::Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
-                    http_version: None
+                    http_version: WithDefault::default()
                 },
                 body: model::RequestBody::None,
                 pre_request_script: Some(model::PreRequestScript::Script(
@@ -2198,9 +2219,9 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: Some(HttpMethod::GET),
+                    method: WithDefault::Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
-                    http_version: None
+                    http_version: WithDefault::default()
                 },
                 body: model::RequestBody::None,
                 pre_request_script: None,
@@ -2245,9 +2266,9 @@ GET https://httpbin.org
                     use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
-                    method: Some(HttpMethod::GET),
+                    method: WithDefault::Some(HttpMethod::GET),
                     target: RequestTarget::from("https://httpbin.org"),
-                    http_version: None
+                    http_version: WithDefault::default()
                 },
                 body: model::RequestBody::None,
                 pre_request_script: None,
