@@ -31,6 +31,253 @@ impl Parser {
         }
     }
 
+    /// Parse the contents of a file into a `model::HttpRestFile`
+    /// # Arguments
+    /// * `path` - path to a .http or .rest file
+    pub fn parse_file(path: &std::path::Path) -> Result<model::HttpRestFile, ParseError> {
+        if let Ok(content) = fs::read_to_string(path) {
+            let result = Parser::parse(&content, true);
+            if result.requests.is_empty() {
+                return Err(ParseError::new(ParseErrorKind::NoRequestFoundInFile, ""));
+            }
+            Ok(HttpRestFile {
+                requests: result.requests,
+                errs: result.errs,
+                path: Box::new(path.to_owned()),
+                extension: HttpRestFileExtension::from_path(path),
+            })
+        } else {
+            let path_str = path.to_str();
+            if path_str.is_none() {
+                return Err(ParseError::new(ParseErrorKind::InvalidFilePath, ""));
+            }
+            Err(ParseError::new(
+                ParseErrorKind::FileReadError,
+                format!("Could not read file content, path: {}", path_str.unwrap()),
+            ))
+        }
+    }
+
+    /// Parse the contents of a request file as string into multiple requests within a
+    /// `model::FileParseResult`. This model contains all parsed requests as well as errors
+    /// encountered during parsing.
+    /// # Arguments
+    /// * `string` - string to parse
+    /// * `print_errors` - if set to true prints errors to the console
+    pub fn parse(string: &str, print_errors: bool) -> model::FileParseResult {
+        let mut scanner = Scanner::new(string);
+
+        let mut requests: Vec<model::Request> = Vec::new();
+        let mut errs: Vec<ParseError> = Vec::new();
+
+        loop {
+            scanner.skip_empty_lines();
+            match Parser::parse_request(&mut scanner) {
+                Ok((request, current_errs)) => {
+                    requests.push(request);
+                    errs.extend(current_errs);
+                }
+                Err(parse_errs) => {
+                    errs.extend(parse_errs);
+                }
+            }
+            scanner.skip_empty_lines();
+            scanner.skip_ws();
+            if scanner.is_done() {
+                break;
+            }
+
+            // There might be an ending Request separator or not
+            if !scanner.match_str_forward(REQUEST_SEPARATOR) {
+                let msg = format!(
+                    "Expected request to be terminated with '###' found {}",
+                    scanner.peek_line().map_or("".to_string(), |l| l)
+                );
+                errs.push(ParseError::new_with_position(
+                    ParseErrorKind::InvalidRequestBoundary,
+                    msg,
+                    scanner.get_pos(),
+                    None::<usize>,
+                ))
+            }
+            scanner.skip_empty_lines();
+            scanner.skip_ws();
+            if scanner.is_done() {
+                break;
+            }
+        }
+        if dbg!(!errs.is_empty() && print_errors) {
+            eprintln!("{}", Parser::get_pretty_print_errs(&scanner, errs.iter()));
+        }
+        FileParseResult { requests, errs }
+    }
+
+    /// Parse a single request either until no further lines are present or a `REQUEST_SEPARATOR`
+    /// is encountered
+    pub fn parse_request(
+        scanner: &mut Scanner,
+    ) -> Result<(model::Request, Vec<ParseError>), Vec<ParseError>> {
+        let mut comments = Vec::new();
+        let mut name: Option<String> = None;
+        let mut parse_errs: Vec<ParseError> = Vec::new();
+        let mut request_settings = RequestSettings::default();
+        let mut pre_request_script: Option<model::PreRequestScript> = None;
+
+        scanner.skip_empty_lines();
+
+        loop {
+            // preq-request-scrip
+            if scanner.peek().map_or(false, |c| c == &'<') {
+                if let Ok(result) = Parser::parse_pre_request_script(scanner) {
+                    pre_request_script = result;
+                };
+                continue;
+            }
+            match Parser::parse_meta_comment_line(scanner) {
+                Some(Ok(SettingsEntry::NameEntry(entry_name))) => {
+                    name = Some(entry_name);
+                    continue;
+                }
+                Some(Ok(entry)) => {
+                    request_settings.set_entry(&entry);
+                    continue;
+                }
+                Some(Err(parse_error)) => {
+                    parse_errs.push(parse_error);
+                }
+                None => (), // ignore
+            }
+
+            match Parser::parse_comment(scanner) {
+                Ok(Some(comment_node)) => {
+                    comments.push(comment_node);
+                }
+                Ok(None) => {
+                    break;
+                }
+                Err(parse_error) => {
+                    parse_errs.push(parse_error);
+                    break;
+                }
+            }
+        }
+
+        // if no name has been found with meta tag @name=, set name from a comment starting with
+        // '###' if there is any
+        if name.is_none() {
+            if let Some(position) = comments
+                .iter()
+                .position(|c| c.kind == CommentKind::RequestSeparator)
+            {
+                let comment = comments.remove(position);
+                name = Some(comment.value.trim().to_string());
+            }
+        }
+
+        let request_line = match Parser::parse_request_line(scanner) {
+            Ok((request_line, errs)) => {
+                parse_errs.extend(errs);
+                request_line
+            }
+            Err(parse_error) => {
+                parse_errs.push(parse_error);
+                return Err(parse_errs);
+            }
+        };
+
+        // end of request reached?
+        {
+            let peek_line = scanner.peek_line();
+            if peek_line.is_some() && peek_line.unwrap().trim().starts_with(REQUEST_SEPARATOR) {
+                let request_node = model::Request {
+                    name,
+                    comments,
+                    request_line,
+                    // no headers nor body parsed
+                    headers: vec![],
+                    body: model::RequestBody::None,
+                    settings: request_settings,
+                    pre_request_script,
+                    response_handler: None,
+                    redirect: None,
+                };
+                return Ok((request_node, parse_errs));
+            }
+        }
+
+        let headers = match Parser::parse_headers(scanner) {
+            Ok(headers) => headers,
+            Err(parse_err) => {
+                parse_errs.push(parse_err);
+                Vec::<model::Header>::new()
+            }
+        };
+
+        scanner.skip_empty_lines();
+
+        let (body, mut body_parse_errs) = Parser::parse_body(scanner, &headers);
+        parse_errs.append(&mut body_parse_errs);
+
+        let mut response_handler: Option<ResponseHandler> = None;
+        if let Ok(Some(result)) = Parser::parse_response_handler(scanner) {
+            response_handler = Some(result);
+        };
+        scanner.skip_empty_lines();
+
+        let mut redirect: Option<Redirect> = None;
+        if let Ok(Some(result)) = Parser::parse_redirect(scanner) {
+            redirect = Some(result);
+        }
+        scanner.skip_empty_lines();
+
+        let mut request_node = model::Request {
+            name,
+            comments,
+            request_line,
+            headers,
+            body,
+            settings: request_settings,
+            pre_request_script,
+            response_handler,
+            redirect,
+        };
+
+        // if no name set we use the first comment as name
+        // @TODO: only remove comment if it is a '###' comment
+        #[allow(clippy::comparison_to_empty)]
+        if request_node.name.is_none() && !request_node.comments.is_empty() {
+            let first_comment = request_node.comments.remove(0);
+            request_node.name = Some(first_comment.value);
+        }
+        Ok((request_node, parse_errs))
+    }
+
+    /// Get string for printing errors to the console
+    fn get_pretty_print_errs<'a, T>(scanner: &Scanner, errs: T) -> String
+    where
+        T: Iterator<Item = &'a ParseError>,
+    {
+        errs.map(|err| Parser::pretty_err_string(scanner, err))
+            .collect::<Vec<String>>()
+            .join(&format!("\n{}\n", "-".repeat(50)))
+    }
+
+    fn pretty_err_string(scanner: &Scanner, err: &ParseError) -> String {
+        let mut result = String::new();
+        result.push_str(&format!("Error: {:?} - {}\n", err.kind, err.message));
+        if err.start_pos.is_some() {
+            let error_context = scanner.get_error_context(err.start_pos.unwrap(), err.end_pos);
+            result.push_str(&format!(
+                "Position: {}:{}\n",
+                error_context.line, error_context.column
+            ));
+            result.push_str(&error_context.context);
+        }
+        result
+    }
+
+    /// Parses the meta comment line that contains a name.
+    /// Assumes the comment characters ('//' or '#') for a comment have been stripped away
     fn parse_meta_name(scanner: &mut Scanner) -> Result<Option<String>, ParseError> {
         scanner.skip_ws();
 
@@ -43,7 +290,7 @@ impl Parser {
         }
     }
 
-    /// match a comment line after '###', '//' or '##' has been stripped from it
+    /// Match a comment line after '###', '//' or '##' has been stripped from it
     fn parse_comment_line(
         scanner: &mut Scanner,
         kind: CommentKind,
@@ -103,6 +350,72 @@ impl Parser {
         None
     }
 
+    /// Parse pre request scripts, which are either a path to a javascript file or blocks of text containing javascript code within '{% %}' blocks
+    /// The full script is parsed as a single string if '{% %}' blocks are present otherwise a path is parsed.
+    /// See also the `parse_response_handler` which parses similarly code that handles a response.
+    fn parse_pre_request_script(
+        scanner: &mut Scanner,
+    ) -> Result<Option<model::PreRequestScript>, ParseError> {
+        if !scanner.take(&'<') {
+            return Ok(None);
+        };
+        let start_pos = scanner.get_pos();
+        scanner.skip_ws();
+        if !scanner.match_str_forward("{%") {
+            // if no starting script is found then a handler script should be presnet
+            let line = scanner.get_line_and_advance();
+            if line.is_none() {
+                let msg = "Expected pre request starting characters '{%' after a matching '<', or a filepath to a handler script above the request.".to_string();
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidPreRequestScript,
+                    msg,
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
+            }
+            return Ok(Some(model::PreRequestScript::FromFilepath(
+                line.unwrap().trim().to_string(),
+            )));
+        }
+
+        let mut found: bool = false;
+        let mut lines: Vec<String> = Vec::new();
+        loop {
+            if let Ok(Some(result)) = scanner.match_regex_forward("(.*)%}") {
+                if result.len() == 1 {
+                    lines.push(result[0].to_string());
+                    found = true;
+                    break;
+                } else {
+                    return Err(ParseError::new_with_position(
+                        ParseErrorKind::InvalidPreRequestScript,
+                        "Invalid pre request script found",
+                        start_pos,
+                        Some(scanner.get_pos()),
+                    ));
+                }
+            } else {
+                let line = scanner.get_line_and_advance();
+                if line.is_none() {
+                    break;
+                }
+
+                lines.push(line.unwrap());
+            }
+        }
+
+        if !found {
+            let msg = "Error parsing pre request script. Expected closing chraacters '}%' but none were found".to_string();
+            return Err(ParseError::new_with_position(
+                ParseErrorKind::InvalidPreRequestScript,
+                msg,
+                start_pos,
+                Some(scanner.get_pos()),
+            ));
+        }
+        scanner.skip_to_next_line();
+        Ok(Some(model::PreRequestScript::Script(lines.join("\n"))))
+    }
     // @TODO: create a macro that generates a match statement for each enum variant
     fn match_request_method(str: &str) -> model::HttpMethod {
         match str {
@@ -119,8 +432,7 @@ impl Parser {
         }
     }
 
-    // [method required-whitespace] request-target [required-whitespace http-version]
-    // @TODO errors are ignored for now!
+    /// Parse a request line of the form '[method required-whitespace] request-target [required-whitespace http-version]'
     fn parse_request_line(scanner: &mut Scanner) -> ParseResult<model::RequestLine> {
         let mut line = match scanner.get_line_and_advance() {
             Some(line) => line,
@@ -152,33 +464,23 @@ impl Parser {
         let line_scanner = Scanner::new(&line);
         let tokens: Vec<String> = line_scanner.get_tokens();
 
-        // @TODO: still keep error around but also return 'patched up' model?
         let (request_line, err): (model::RequestLine, Option<ParseError>) = match &tokens[..] {
-            [target_str] => {
-                // @TODO: why can't we pass target_str or &(*target_str) directly?
-                let str: &str = target_str;
-                (
-                    model::RequestLine {
-                        target: RequestTarget::from(str),
-                        method: model::WithDefault::default(),
-                        http_version: model::WithDefault::default(),
-                    },
-                    None,
-                )
-            }
-            [method, target_str] => {
-                // @TODO: why can't we pass target_str or &(*target_str) directly?
-                let str: &str = target_str;
-
-                (
-                    model::RequestLine {
-                        target: RequestTarget::from(str),
-                        method: WithDefault::Some(Parser::match_request_method(method)),
-                        http_version: WithDefault::default(),
-                    },
-                    None,
-                )
-            }
+            [target_str] => (
+                model::RequestLine {
+                    target: RequestTarget::from(&target_str[..]),
+                    method: model::WithDefault::default(),
+                    http_version: model::WithDefault::default(),
+                },
+                None,
+            ),
+            [method, target_str] => (
+                model::RequestLine {
+                    target: RequestTarget::from(&target_str[..]),
+                    method: WithDefault::Some(Parser::match_request_method(method)),
+                    http_version: WithDefault::default(),
+                },
+                None,
+            ),
 
             [method, target_str, http_version_str] => {
                 let result = model::HttpVersion::from_str(http_version_str);
@@ -187,11 +489,9 @@ impl Parser {
                     Err(err) => (WithDefault::default(), Some(err)),
                 };
 
-                // @TODO: why can't we pass target_str or &(*target_str) directly?
-                let str: &str = target_str;
                 (
                     model::RequestLine {
-                        target: RequestTarget::from(str),
+                        target: RequestTarget::from(&target_str[..]),
                         method: WithDefault::Some(Parser::match_request_method(method)),
                         http_version,
                     },
@@ -209,20 +509,15 @@ impl Parser {
             }
             // on a request line only method, target and http_version should be present
             [method, target_str, http_version_str, ..] => {
-                /* if let Err(parse_error) = Parser::validate_http_version(http_version) {
-                    parse_errs.push(parse_error);
-                } */
-                // @TODO: why can't we pass target_str or &(*target_str) directly?
                 let result = model::HttpVersion::from_str(http_version_str);
                 let http_version = match result {
                     Ok(version) => Some(version),
                     Err(_) => None,
                 };
 
-                let str: &str = target_str;
                 (
                     model::RequestLine {
-                        target: RequestTarget::from(str),
+                        target: RequestTarget::from(&target_str[..]),
                         method: WithDefault::Some(Parser::match_request_method(method)),
                         http_version: WithDefault::from(http_version),
                     },
@@ -238,27 +533,27 @@ You have additional elements: '{}'",
                         Some(line_end),
                     )),
                 )
-            } // @TODO: ERROR
+            }
         };
 
         let mut errs: Vec<ParseError> = Vec::new();
         if let Some(err) = err {
             errs.push(err);
         }
-        // @TODO: validate target, http_version
         Ok((request_line, errs))
     }
 
+    /// Parse a regular comment either starts with '###' or with '//' or '#'
+    /// Both '//' and '#' comments may contain meta information, in this case they are not parsed
+    /// as regular comments. If a '###' comment occurs alone without any other comments, then it
+    /// signifies the name of a request and will be transformed afterwards and not taken as regular
+    /// comment.
+    /// Note that '###' can also be a request separator
     fn parse_comment(scanner: &mut Scanner) -> Result<Option<model::Comment>, ParseError> {
         scanner.skip_empty_lines();
         // comments can be indented
         scanner.skip_ws();
 
-        // a regular comment either starts with '###' or with '//'
-        // note that '###' can also be a request separator
-        // apparently '##' is also accepted as a comment within intellij idea as long as there is
-        // no '@name' somewhere within the line which would be the case for a name comment '#
-        // @name=<yourRequestName>'
         if scanner.match_str_forward(CommentKind::RequestSeparator.string_repr()) {
             return Parser::parse_comment_line(scanner, CommentKind::RequestSeparator);
         }
@@ -275,6 +570,213 @@ You have additional elements: '{}'",
         Ok(None)
     }
 
+    /// Parse http headers, they can either belong to a request or each multipart part can also
+    /// contain headers. This function is used to parse both cases.
+    fn parse_headers(scanner: &mut Scanner) -> Result<Vec<model::Header>, ParseError> {
+        let mut headers: Vec<model::Header> = Vec::new();
+
+        let header_regex = regex::Regex::from_str("^([^:]+):\\s*(.+)\\s*").unwrap();
+
+        loop {
+            if scanner.is_done() {
+                return Ok(headers);
+            }
+
+            // newline after requestline and headers ends header section
+            if let Some(&'\n') = scanner.peek() {
+                return Ok(headers);
+            }
+
+            let line = scanner.get_line_and_advance().unwrap();
+            let captures = header_regex.captures(&line);
+
+            let err_msg = format!(
+                "Expected header in the form of <Key>: <Value>. Found line: {}",
+                line
+            );
+            if captures.is_none() {
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidHeaderFields,
+                    err_msg,
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
+            }
+            let captures = captures.unwrap();
+            match (captures.get(1), captures.get(2)) {
+                (Some(key_match), Some(value_match)) => {
+                    //@TODO: validate header fields
+                    headers.push(model::Header {
+                        key: key_match.as_str().to_string(),
+                        value: value_match.as_str().to_string(),
+                    })
+                }
+                _ => {
+                    return Err(ParseError::new_with_position(
+                        ParseErrorKind::InvalidHeaderFields,
+                        err_msg,
+                        scanner.get_pos(),
+                        None::<usize>,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Parse the body of an http request. Can either be multipart or contain some kind of data.
+    /// The Jetbrains client trims the data so trailing newlines or whitespace is also ignored when
+    /// parsing here
+    fn parse_body(
+        scanner: &mut Scanner,
+        headers: &[model::Header],
+    ) -> (model::RequestBody, Vec<ParseError>) {
+        let mut body = model::RequestBody::None;
+        let mut parse_errs: Vec<ParseError> = Vec::new();
+        // if a multipart header is present for the request try to parse as multipart body
+        if let Some(multipart_header) = headers.iter().find(|header| {
+            header.key == "Content-Type" && header.value.starts_with("multipart/form-data")
+        }) {
+            let boundary_regex =
+                regex::Regex::from_str("multipart/form-data\\s*;\\s*boundary\\s*=\\s*(.+)")
+                    .unwrap();
+            let captures = boundary_regex.captures(&multipart_header.value);
+
+            if let Some(captures) = captures {
+                let boundary_match = captures.get(1);
+
+                // either with or without quotes
+                if boundary_match.is_none() {
+                    let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
+                    parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg));
+                }
+                let mut boundary = boundary_match.unwrap().as_str();
+                if boundary.starts_with('"') && boundary.ends_with('"') {
+                    boundary = &boundary[1..(boundary.len() - 1)];
+                }
+                if let Err(boundary_err) = Parser::is_multipart_boundary_valid(boundary) {
+                    parse_errs.push(boundary_err);
+                }
+                match Parser::parse_multipart_body(scanner, boundary) {
+                    Ok(multipart_body) => body = multipart_body,
+                    Err(err) => parse_errs.push(err),
+                };
+            } else {
+                let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
+                parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg))
+            }
+
+        // If not a multipart body then just parse the data
+        } else {
+            if scanner.is_done() {
+                return (body, parse_errs);
+            }
+
+            let start_pos = scanner.get_pos();
+            loop {
+                let peek_line = scanner.peek_line();
+                if peek_line.is_none() {
+                    break;
+                }
+                let peek_line = peek_line.unwrap();
+                // new request starts
+                if peek_line.starts_with(REQUEST_SEPARATOR) {
+                    break;
+                }
+
+                // response handler
+                if peek_line.starts_with('>') {
+                    // if previous line is empty then do not parse it as body before response
+                    // handler, when serializing we put an additional new line for clarity that
+                    // should not be part of the body
+                    if scanner
+                        .get_prev_line()
+                        .map_or(false, |l| l.trim().is_empty())
+                    {
+                        scanner.step_to_previous_line_start();
+                    }
+                    break;
+                }
+
+                // output handler / redirect also ends body
+                if peek_line.starts_with(">>") {
+                    // if previous line is empty then do not parse it as body before redirect
+                    // when serializing we add an additional newline before the redirect for
+                    // clarity which should not be part of the body
+                    if scanner
+                        .get_prev_line()
+                        .map_or(false, |l| l.trim().is_empty())
+                    {
+                        scanner.step_to_previous_line_start();
+                    }
+                    break;
+                }
+                scanner.skip_to_next_line();
+            }
+            let mut end_pos = scanner.get_pos();
+            if start_pos > end_pos {
+                end_pos = start_pos.clone();
+            }
+            let body_str = scanner.get_from_to(start_pos, end_pos);
+            if body_str.trim().starts_with('<') {
+                let path = body_str.split('<').nth(1).unwrap().trim();
+                body = model::RequestBody::Text {
+                    data: DataSource::FromFilepath(path.to_string()),
+                };
+            } else if !body_str.is_empty() {
+                body = model::RequestBody::Text {
+                    // We trim trailing newlines, jetbrains client does the same
+                    // However, this means a text body cannot contain trailing newlines @TODO
+                    data: DataSource::Raw(body_str.trim_end_matches('\n').to_string()),
+                };
+            }
+        }
+        (body, parse_errs)
+    }
+
+    /// Parse a multipart http body
+    fn parse_multipart_body(
+        scanner: &mut Scanner,
+        boundary: &str,
+    ) -> Result<model::RequestBody, ParseError> {
+        scanner.skip_empty_lines();
+
+        let mut parts: Vec<Multipart> = Vec::new();
+
+        let mut errors: Vec<ParseError> = Vec::new();
+        loop {
+            let multipart = Parser::parse_multipart_part(scanner, boundary);
+            if let Err(err) = multipart {
+                errors.push(err);
+                break;
+            }
+            let multipart = multipart.unwrap();
+            parts.push(multipart);
+            if scanner.is_done() {
+                break;
+            }
+            // end of multipart
+            let end_boundary = regex::escape(&format!("--{}--", boundary));
+            if scanner.match_str_forward(&end_boundary) {
+                break;
+            }
+
+            let next_boundary = format!("--{}", boundary);
+            if !scanner.match_str_forward(&next_boundary) {
+                return Err(ParseError::new_with_position(
+                    ParseErrorKind::InvalidMultipart,
+                    format!("Expected next boundary: {}. ", &next_boundary),
+                    scanner.get_pos(),
+                    None::<usize>,
+                ));
+            }
+        }
+        Ok(model::RequestBody::Multipart {
+            boundary: boundary.to_string(),
+            parts,
+        })
+    }
+
+    /// Parse a single block of a multipart body
     fn parse_multipart_part(
         scanner: &mut Scanner,
         boundary: &str,
@@ -448,105 +950,7 @@ You have additional elements: '{}'",
         }
     }
 
-    fn parse_multipart_body(
-        scanner: &mut Scanner,
-        boundary: &str,
-    ) -> Result<model::RequestBody, ParseError> {
-        scanner.skip_empty_lines();
-
-        // parse multipart @TODO check content type is a-ok!
-        let mut parts: Vec<Multipart> = Vec::new();
-
-        let mut errors: Vec<ParseError> = Vec::new();
-        loop {
-            let multipart = Parser::parse_multipart_part(scanner, boundary);
-            if let Err(err) = multipart {
-                // @TODO what to do with the error?
-                errors.push(err);
-                break;
-            }
-            let multipart = multipart.unwrap();
-            parts.push(multipart);
-            if scanner.is_done() {
-                break;
-            }
-            // end of multipart
-            let end_boundary = regex::escape(&format!("--{}--", boundary));
-            if scanner.match_str_forward(&end_boundary) {
-                break;
-            }
-
-            let next_boundary = format!("--{}", boundary);
-            if !scanner.match_str_forward(&next_boundary) {
-                // @TDOO: return error and parsed rest...
-                // @TODO: better error message
-                return Err(ParseError::new_with_position(
-                    ParseErrorKind::InvalidMultipart,
-                    format!("Expected next boundary: {}. ", &next_boundary),
-                    scanner.get_pos(),
-                    None::<usize>,
-                ));
-            }
-        }
-        Ok(model::RequestBody::Multipart {
-            boundary: boundary.to_string(),
-            parts,
-        })
-    }
-
-    fn parse_headers(scanner: &mut Scanner) -> Result<Vec<model::Header>, ParseError> {
-        let mut headers: Vec<model::Header> = Vec::new();
-
-        let header_regex = regex::Regex::from_str("^([^:]+):\\s*(.+)\\s*").unwrap();
-
-        loop {
-            if scanner.is_done() {
-                return Ok(headers);
-            }
-
-            // newline after requestline and headers ends header section
-            if let Some(&'\n') = scanner.peek() {
-                return Ok(headers);
-            }
-
-            let line = scanner.get_line_and_advance().unwrap();
-            let captures = header_regex.captures(&line);
-
-            let err_msg = format!(
-                "Expected header in the form of <Key>: <Value>. Found line: {}",
-                line
-            );
-            if captures.is_none() {
-                return Err(ParseError::new_with_position(
-                    ParseErrorKind::InvalidHeaderFields,
-                    err_msg,
-                    scanner.get_pos(),
-                    None::<usize>,
-                ));
-            }
-            let captures = captures.unwrap();
-            match (captures.get(1), captures.get(2)) {
-                (Some(key_match), Some(value_match)) => {
-                    //@TODO: validate header fields
-                    headers.push(model::Header {
-                        key: key_match.as_str().to_string(),
-                        value: value_match.as_str().to_string(),
-                    })
-                }
-                _ => {
-                    return Err(ParseError::new_with_position(
-                        ParseErrorKind::InvalidHeaderFields,
-                        err_msg,
-                        scanner.get_pos(),
-                        None::<usize>,
-                    ));
-                }
-            }
-        }
-    }
-
-    // TODO:
-    // https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
+    /// Checks whether a multipart boundary is valid or not according to: https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
     fn is_multipart_boundary_valid(boundary: &str) -> Result<(), ParseError> {
         let boundary_len = boundary.len();
         if !(1..=70).contains(&boundary_len) {
@@ -586,176 +990,9 @@ You have additional elements: '{}'",
         Ok(())
     }
 
-    fn parse_body(
-        scanner: &mut Scanner,
-        headers: &[model::Header],
-    ) -> (model::RequestBody, Vec<ParseError>) {
-        let mut body = model::RequestBody::None;
-        let mut parse_errs: Vec<ParseError> = Vec::new();
-        if let Some(multipart_header) = headers.iter().find(|header| {
-            header.key == "Content-Type" && header.value.starts_with("multipart/form-data")
-        }) {
-            // @TODO check what can be part within Content-Type header...
-            let boundary_regex =
-                regex::Regex::from_str("multipart/form-data\\s*;\\s*boundary\\s*=\\s*(.+)")
-                    .unwrap();
-            let captures = boundary_regex.captures(&multipart_header.value);
-
-            if let Some(captures) = captures {
-                let boundary_match = captures.get(1);
-
-                // either with or without quotes
-                if boundary_match.is_none() {
-                    let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
-                    parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg));
-                }
-                let mut boundary = boundary_match.unwrap().as_str();
-                if boundary.starts_with('"') && boundary.ends_with('"') {
-                    boundary = &boundary[1..(boundary.len() - 1)];
-                }
-                // @TODO validate boundary string
-                if let Err(boundary_err) = Parser::is_multipart_boundary_valid(boundary) {
-                    parse_errs.push(boundary_err);
-                }
-                match Parser::parse_multipart_body(scanner, boundary) {
-                    Ok(multipart_body) => body = multipart_body,
-                    Err(err) => parse_errs.push(err),
-                };
-            } else {
-                let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
-                parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg))
-            }
-        } else {
-            if scanner.is_done() {
-                return (body, parse_errs);
-            }
-
-            let start_pos = scanner.get_pos();
-            loop {
-                let peek_line = scanner.peek_line();
-                if peek_line.is_none() {
-                    break;
-                }
-                let peek_line = peek_line.unwrap();
-                // new request starts
-                if peek_line.starts_with(REQUEST_SEPARATOR) {
-                    break;
-                }
-
-                // response handler
-                if peek_line.starts_with('>') {
-                    // if previous line is empty then do not parse it as body before response
-                    // handler, when serializing we put an additional new line for clarity that
-                    // should not be part of the body
-                    if scanner
-                        .get_prev_line()
-                        .map_or(false, |l| l.trim().is_empty())
-                    {
-                        scanner.step_to_previous_line_start();
-                    }
-                    break;
-                }
-
-                // output handler / redirect also ends body
-                if peek_line.starts_with(">>") {
-                    // if previous line is empty then do not parse it as body before redirect
-                    // when serializing we add an additional newline before the redirect for
-                    // clarity which should not be part of the body
-                    if scanner
-                        .get_prev_line()
-                        .map_or(false, |l| l.trim().is_empty())
-                    {
-                        scanner.step_to_previous_line_start();
-                    }
-                    break;
-                }
-                scanner.skip_to_next_line();
-            }
-            let mut end_pos = scanner.get_pos();
-            if start_pos > end_pos {
-                end_pos = start_pos.clone();
-            }
-            let body_str = scanner.get_from_to(start_pos, end_pos);
-            if body_str.trim().starts_with('<') {
-                let path = body_str.split('<').nth(1).unwrap().trim();
-                body = model::RequestBody::Text {
-                    data: DataSource::FromFilepath(path.to_string()),
-                };
-            } else if !body_str.is_empty() {
-                body = model::RequestBody::Text {
-                    // We trim trailing newlines, jetbrains client does the same
-                    // However, this means a text body cannot contain trailing newlines @TODO
-                    data: DataSource::Raw(body_str.trim_end_matches('\n').to_string()),
-                };
-            }
-        }
-        (body, parse_errs)
-    }
-
-    fn parse_pre_request_script(
-        scanner: &mut Scanner,
-    ) -> Result<Option<model::PreRequestScript>, ParseError> {
-        if !scanner.take(&'<') {
-            return Ok(None);
-        };
-        let start_pos = scanner.get_pos();
-        scanner.skip_ws();
-        if !scanner.match_str_forward("{%") {
-            // if no starting script is found then a handler script should be presnet
-            let line = scanner.get_line_and_advance();
-            if line.is_none() {
-                let msg = "Expected pre request starting characters '{%' after a matching '<', or a filepath to a handler script above the request.".to_string();
-                return Err(ParseError::new_with_position(
-                    ParseErrorKind::InvalidPreRequestScript,
-                    msg,
-                    scanner.get_pos(),
-                    None::<usize>,
-                ));
-            }
-            return Ok(Some(model::PreRequestScript::FromFilepath(
-                line.unwrap().trim().to_string(),
-            )));
-        }
-
-        let mut found: bool = false;
-        let mut lines: Vec<String> = Vec::new();
-        loop {
-            if let Ok(Some(result)) = scanner.match_regex_forward("(.*)%}") {
-                if result.len() == 1 {
-                    lines.push(result[0].to_string());
-                    found = true;
-                    break;
-                } else {
-                    return Err(ParseError::new_with_position(
-                        ParseErrorKind::InvalidPreRequestScript,
-                        "Invalid pre request script found",
-                        start_pos,
-                        Some(scanner.get_pos()),
-                    ));
-                }
-            } else {
-                let line = scanner.get_line_and_advance();
-                if line.is_none() {
-                    break;
-                }
-
-                lines.push(line.unwrap());
-            }
-        }
-
-        if !found {
-            let msg = "Error parsing pre request script. Expected closing chraacters '}%' but none were found".to_string();
-            return Err(ParseError::new_with_position(
-                ParseErrorKind::InvalidPreRequestScript,
-                msg,
-                start_pos,
-                Some(scanner.get_pos()),
-            ));
-        }
-        scanner.skip_to_next_line();
-        Ok(Some(model::PreRequestScript::Script(lines.join("\n"))))
-    }
-
+    /// Parse a response handler. The http client can also pass the response data to a javascript block or to javascript code
+    /// within a file if given as a path. This function parses either a path or the script as
+    /// string similar to the `parse_pre_request_script` function.
     fn parse_response_handler(
         scanner: &mut Scanner,
     ) -> Result<Option<model::ResponseHandler>, ParseError> {
@@ -824,6 +1061,8 @@ You have additional elements: '{}'",
         }
     }
 
+    /// Parse a redirect line. A redirect can specify where the response of an http request should
+    /// be saved. A redirect line either has the form `>> <some/path>` or `>>! <some/path>`
     fn parse_redirect(scanner: &mut Scanner) -> Result<Option<Redirect>, ParseError> {
         scanner.skip_empty_lines();
         let start_pos = scanner.get_pos();
@@ -854,239 +1093,6 @@ You have additional elements: '{}'",
         } else {
             Ok(Some(Redirect::NewFileIfExists(path)))
         }
-    }
-
-    pub fn parse_request(
-        scanner: &mut Scanner,
-    ) -> Result<(model::Request, Vec<ParseError>), Vec<ParseError>> {
-        let mut comments = Vec::new();
-        let mut name: Option<String> = None;
-        let mut parse_errs: Vec<ParseError> = Vec::new();
-        let mut request_settings = RequestSettings::default();
-        let mut pre_request_script: Option<model::PreRequestScript> = None;
-
-        scanner.skip_empty_lines();
-
-        loop {
-            // preq-request-scrip
-            if scanner.peek().map_or(false, |c| c == &'<') {
-                if let Ok(result) = Parser::parse_pre_request_script(scanner) {
-                    pre_request_script = result;
-                };
-                continue;
-            }
-            match Parser::parse_meta_comment_line(scanner) {
-                Some(Ok(SettingsEntry::NameEntry(entry_name))) => {
-                    name = Some(entry_name);
-                    continue;
-                }
-                Some(Ok(entry)) => {
-                    request_settings.set_entry(&entry);
-                    continue;
-                }
-                Some(Err(parse_error)) => {
-                    parse_errs.push(parse_error);
-                }
-                None => (), // ignore
-            }
-
-            match Parser::parse_comment(scanner) {
-                Ok(Some(comment_node)) => {
-                    comments.push(comment_node);
-                }
-                Ok(None) => {
-                    break;
-                }
-                Err(parse_error) => {
-                    parse_errs.push(parse_error);
-                    break;
-                }
-            }
-        }
-
-        // if no name has been found with meta tag @name=, set name from a comment starting with
-        // '###' if there is any
-        if name.is_none() {
-            if let Some(position) = comments
-                .iter()
-                .position(|c| c.kind == CommentKind::RequestSeparator)
-            {
-                let comment = comments.remove(position);
-                name = Some(comment.value.trim().to_string());
-            }
-        }
-
-        let request_line = match Parser::parse_request_line(scanner) {
-            Ok((request_line, errs)) => {
-                parse_errs.extend(errs);
-                request_line
-            }
-            Err(parse_error) => {
-                parse_errs.push(parse_error);
-                return Err(parse_errs);
-            }
-        };
-
-        // end of request reached?
-        {
-            let peek_line = scanner.peek_line();
-            if peek_line.is_some() && peek_line.unwrap().trim().starts_with(REQUEST_SEPARATOR) {
-                let request_node = model::Request {
-                    name,
-                    comments,
-                    request_line,
-                    // no headers nor body parsed
-                    headers: vec![],
-                    body: model::RequestBody::None,
-                    settings: request_settings,
-                    pre_request_script,
-                    response_handler: None,
-                    redirect: None,
-                };
-                return Ok((request_node, parse_errs));
-            }
-        }
-
-        let headers = match Parser::parse_headers(scanner) {
-            Ok(headers) => headers,
-            Err(parse_err) => {
-                parse_errs.push(parse_err);
-                Vec::<model::Header>::new()
-            }
-        };
-
-        scanner.skip_empty_lines();
-
-        //@TODO body
-        let (body, mut body_parse_errs) = Parser::parse_body(scanner, &headers);
-        parse_errs.append(&mut body_parse_errs);
-
-        let mut response_handler: Option<ResponseHandler> = None;
-        if let Ok(Some(result)) = Parser::parse_response_handler(scanner) {
-            response_handler = Some(result);
-        };
-        scanner.skip_empty_lines();
-
-        let mut redirect: Option<Redirect> = None;
-        if let Ok(Some(result)) = Parser::parse_redirect(scanner) {
-            redirect = Some(result);
-        }
-        scanner.skip_empty_lines();
-
-        let mut request_node = model::Request {
-            name,
-            comments,
-            request_line,
-            headers,
-            body,
-            settings: request_settings,
-            pre_request_script,
-            response_handler,
-            redirect,
-        };
-
-        // if no name set we use the first comment as name @TODO: only ### comment is accepted?
-        #[allow(clippy::comparison_to_empty)]
-        if request_node.name.is_none() && !request_node.comments.is_empty() {
-            let first_comment = request_node.comments.remove(0);
-            request_node.name = Some(first_comment.value);
-        }
-        Ok((request_node, parse_errs))
-    }
-
-    pub fn parse_file(path: &std::path::Path) -> Result<model::HttpRestFile, ParseError> {
-        if let Ok(content) = fs::read_to_string(path) {
-            let result = Parser::parse(&content, true);
-            if result.requests.is_empty() {
-                return Err(ParseError::new(ParseErrorKind::NoRequestFoundInFile, ""));
-            }
-            Ok(HttpRestFile {
-                requests: result.requests,
-                errs: result.errs,
-                path: Box::new(path.to_owned()),
-                extension: HttpRestFileExtension::from_path(path),
-            })
-        } else {
-            let path_str = path.to_str();
-            if path_str.is_none() {
-                return Err(ParseError::new(ParseErrorKind::InvalidFilePath, ""));
-            }
-            Err(ParseError::new(
-                ParseErrorKind::FileReadError,
-                format!("Could not read file content, path: {}", path_str.unwrap()),
-            ))
-        }
-    }
-
-    pub fn parse(string: &str, print_errors: bool) -> model::FileParseResult {
-        let mut scanner = Scanner::new(string);
-
-        let mut requests: Vec<model::Request> = Vec::new();
-        let mut errs: Vec<ParseError> = Vec::new();
-
-        loop {
-            scanner.skip_empty_lines();
-            match Parser::parse_request(&mut scanner) {
-                Ok((request, current_errs)) => {
-                    requests.push(request);
-                    errs.extend(current_errs);
-                }
-                Err(parse_errs) => {
-                    errs.extend(parse_errs);
-                }
-            }
-            scanner.skip_empty_lines();
-            scanner.skip_ws();
-            if scanner.is_done() {
-                break;
-            }
-
-            // There might be an ending Request separator or not
-            if !scanner.match_str_forward(REQUEST_SEPARATOR) {
-                let msg = format!(
-                    "Expected request to be terminated with '###' found {}",
-                    scanner.peek_line().map_or("".to_string(), |l| l)
-                );
-                errs.push(ParseError::new_with_position(
-                    ParseErrorKind::InvalidRequestBoundary,
-                    msg,
-                    scanner.get_pos(),
-                    None::<usize>,
-                ))
-            }
-            scanner.skip_empty_lines();
-            scanner.skip_ws();
-            if scanner.is_done() {
-                break;
-            }
-        }
-        if dbg!(!errs.is_empty() && print_errors) {
-            eprintln!("{}", Parser::pretty_print_errs(&scanner, errs.iter()));
-        }
-        FileParseResult { requests, errs }
-    }
-
-    fn pretty_print_errs<'a, T>(scanner: &Scanner, errs: T) -> String
-    where
-        T: Iterator<Item = &'a ParseError>,
-    {
-        errs.map(|err| Parser::pretty_err_string(scanner, err))
-            .collect::<Vec<String>>()
-            .join(&format!("\n{}\n", "-".repeat(50)))
-    }
-
-    fn pretty_err_string(scanner: &Scanner, err: &ParseError) -> String {
-        let mut result = String::new();
-        result.push_str(&format!("Error: {:?} - {}\n", err.kind, err.message));
-        if err.start_pos.is_some() {
-            let error_context = scanner.get_error_context(err.start_pos.unwrap(), err.end_pos);
-            result.push_str(&format!(
-                "Position: {}:{}\n",
-                error_context.line, error_context.column
-            ));
-            result.push_str(&error_context.context);
-        }
-        result
     }
 }
 
@@ -1815,7 +1821,7 @@ Content-Type: application/json
                         }]
                     },
                     Multipart {
-                        name: "data".to_string(), // @TODO
+                        name: "data".to_string(), 
                         data: DataSource::FromFilepath("./request-form-data.json".to_string()),
                         fields: vec![DispositionField {
                             key: "filename".to_string(),

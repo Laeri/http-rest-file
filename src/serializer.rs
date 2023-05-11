@@ -9,6 +9,7 @@ pub enum SerializeError {
 pub struct Serializer {}
 
 impl Serializer {
+    /// Serializes the request models within a `RequestFile` to the `RequestFile.path`
     pub fn serialize_to_file(file_model: &RequestFile) -> Result<(), SerializeError> {
         let content = Serializer::serialize_requests(
             &file_model.requests.iter().collect::<Vec<&model::Request>>()[..],
@@ -21,6 +22,7 @@ impl Serializer {
         }
     }
 
+    /// Serialize all requests to a `String` delimited by the `crate::parser::REQUEST_SEPARATOR`
     pub fn serialize_requests(requests: &[&model::Request]) -> String {
         let mut result = String::new();
         let num_requests = requests.len();
@@ -31,7 +33,7 @@ impl Serializer {
                     comment.kind == CommentKind::RequestSeparator
                 })
             {
-                result.push_str("###");
+                result.push_str(crate::parser::REQUEST_SEPARATOR);
             }
             result.push_str(&Serializer::serialize_request(request));
 
@@ -43,6 +45,7 @@ impl Serializer {
         result
     }
 
+    /// Serialize a single `model::Request` to a `String`
     pub fn serialize_request(request: &model::Request) -> String {
         let mut result = String::new();
         let comments_string = request
@@ -68,7 +71,6 @@ impl Serializer {
             result.push('\n');
         }
 
-        // @TODO Option type for method
         if let WithDefault::Some(method) = &request.request_line.method {
             result.push_str(&method.to_string());
             result.push(' ');
