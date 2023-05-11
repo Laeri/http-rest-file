@@ -81,7 +81,7 @@ impl ParseError {
 }
 
 #[allow(dead_code)]
-pub enum WithDefault<T: std::fmt::Debug> {
+pub enum WithDefault<T> {
     Some(T),
     Default(T),
     DefaultFn(Box<dyn Fn() -> T>),
@@ -103,14 +103,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for WithDefault<T> {
     }
 }
 
-impl<T: std::fmt::Debug> WithDefault<T> {
+impl<T> WithDefault<T> {
     #[allow(dead_code)]
     fn default_fn(f: Box<dyn Fn() -> T>) -> Self {
         WithDefault::DefaultFn(f)
     }
 }
 
-impl<T: std::fmt::Debug> From<Option<T>> for WithDefault<T>
+impl<T> From<Option<T>> for WithDefault<T>
 where
     WithDefault<T>: Default,
 {
@@ -143,7 +143,7 @@ impl Default for WithDefault<HttpMethod> {
     }
 }
 
-impl<T: std::fmt::Debug> WithDefault<T> {
+impl<T> WithDefault<T> {
     #[allow(dead_code)]
     pub fn is_default(&self) -> bool {
         !matches!(self, WithDefault::Some(_))
@@ -159,7 +159,7 @@ impl<T: std::fmt::Debug> WithDefault<T> {
     }
 }
 
-impl<T: std::fmt::Debug + std::cmp::PartialEq> PartialEq for WithDefault<T> {
+impl<T: std::cmp::PartialEq> PartialEq for WithDefault<T> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (WithDefault::Some(value), WithDefault::Some(other_value)) => value.eq(other_value),
