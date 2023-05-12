@@ -150,10 +150,20 @@ impl<T> WithDefault<T> {
     }
 
     #[allow(dead_code)]
-    pub fn get_or_default(self) -> T {
+    pub fn unwrap_or_default(self) -> T {
         match self {
             WithDefault::Some(value) => value,
             WithDefault::Default(default) => default,
+            WithDefault::DefaultFn(f) => f(),
+        }
+    }
+}
+
+impl<T: Clone> WithDefault<T> {
+    pub fn get_or_default(&self) -> T {
+        match self {
+            WithDefault::Some(value) => value.clone(),
+            WithDefault::Default(default) => default.clone(),
             WithDefault::DefaultFn(f) => f(),
         }
     }
@@ -172,8 +182,8 @@ impl<T: std::cmp::PartialEq> PartialEq for WithDefault<T> {
     }
 }
 
-#[derive(PartialEq, Debug)]
 #[allow(clippy::upper_case_acronyms)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum HttpMethod {
     GET,
     POST,
@@ -518,6 +528,22 @@ pub struct Request {
     pub redirect: Option<Redirect>,
 }
 
+impl Default for Request {
+    fn default() -> Self {
+        Request {
+            name: None,
+            comments: vec![],
+            request_line: RequestLine::default(),
+            headers: vec![],
+            body: RequestBody::None,
+            settings: RequestSettings::default(),
+            pre_request_script: None,
+            response_handler: None,
+            redirect: None,
+        }
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum CommentKind {
     // //
@@ -697,8 +723,11 @@ mod tests {
             WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 1, minor: 1 })).is_default()
         );
 
-        assert_eq!(WithDefault::Some(1).get_or_default(), 1);
-        assert_eq!(WithDefault::Default(1).get_or_default(), 1);
-        assert_eq!(WithDefault::DefaultFn(Box::new(|| 1)).get_or_default(), 1);
+        assert_eq!(WithDefault::Some(1).unwrap_or_default(), 1);
+        assert_eq!(WithDefault::Default(1).unwrap_or_default(), 1);
+        assert_eq!(
+            WithDefault::DefaultFn(Box::new(|| 1)).unwrap_or_default(),
+            1
+        );
     }
 }
