@@ -1363,27 +1363,13 @@ POST https://httpbin.org
 
         // only with relative url
         let expected_target = RequestTarget::Absolute {
-            string: "https://test.com/api/v1/user?show_all=true&limit=10".to_string(),
-            uri: "https://test.com/api/v1/user?show_all=true&limit=10"
-                .parse::<Uri>()
-                .unwrap(),
+            uri: "https://test.com/api/v1/user?show_all=true&limit=10".to_string(),
         };
         assert_eq!(request.request_line.target, expected_target);
 
         match request.request_line.target {
-            RequestTarget::Absolute {
-                ref uri,
-                ref string,
-            } => {
-                assert_eq!(uri.path(), "/api/v1/user");
-                assert_eq!(*uri.scheme().unwrap(), http::uri::Scheme::HTTPS);
-                assert_eq!(uri.authority().unwrap().host(), "test.com");
-                assert_eq!(uri.authority().unwrap().port(), None);
-                assert_eq!(uri.query(), Some("show_all=true&limit=10"));
-                assert_eq!(
-                    string,
-                    "https://test.com/api/v1/user?show_all=true&limit=10"
-                );
+            RequestTarget::Absolute { ref uri } => {
+                assert_eq!(uri, "https://test.com/api/v1/user?show_all=true&limit=10");
             }
             _ => panic!("not expected target found"),
         }
@@ -1432,15 +1418,8 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         match request.request_line.target {
-            RequestTarget::Absolute {
-                ref uri,
-                ref string,
-            } => {
-                assert_eq!(uri.scheme(), None);
-                assert_eq!(uri.host().unwrap(), "test.com");
-                assert_eq!(uri.query(), None);
-                //@TODOassert_eq!(uri.path(), "");
-                assert_eq!(string, "test.com");
+            RequestTarget::Absolute { ref uri } => {
+                assert_eq!(uri, "test.com");
             }
             kind => panic!("!request target is not absolute kind, it is: {:?}", kind),
         }
@@ -1453,19 +1432,12 @@ POST https://httpbin.org
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
         match request.request_line.target {
-            RequestTarget::Absolute {
-                ref uri,
-                ref string,
-            } => {
+            RequestTarget::Absolute { ref uri } => {
                 // @TODO: with uri parser we cannot have
                 // authority and path without a scheme, add http as default in this case if no
                 // scheme is present
 
-                assert_eq!(*uri.scheme().unwrap(), http::uri::Scheme::HTTP);
-                assert_eq!(uri.host().unwrap(), "test.com");
-                assert_eq!(uri.query(), None);
-                assert_eq!(uri.path(), "/api/v1/test");
-                assert_eq!(string, "test.com/api/v1/test");
+                assert_eq!(uri, "test.com/api/v1/test");
             }
             kind => panic!("!request target is not absolute kind, it is: {:?}", kind),
         }
@@ -1480,23 +1452,13 @@ POST https://httpbin.org
 
         // only with relative url
         let expected_target = RequestTarget::RelativeOrigin {
-            string: "/api/v1/user?show_all=true&limit=10".to_string(),
-            uri: "/api/v1/user?show_all=true&limit=10"
-                .parse::<Uri>()
-                .unwrap(),
+            uri: "/api/v1/user?show_all=true&limit=10".to_string(),
         };
         assert_eq!(request.request_line.target, expected_target);
 
         match request.request_line.target {
-            RequestTarget::RelativeOrigin {
-                ref uri,
-                ref string,
-            } => {
-                assert_eq!(uri.path(), "/api/v1/user");
-                assert_eq!(uri.scheme(), None);
-                assert_eq!(uri.authority(), None);
-                assert_eq!(uri.query(), Some("show_all=true&limit=10"));
-                assert_eq!(string, "/api/v1/user?show_all=true&limit=10");
+            RequestTarget::RelativeOrigin { ref uri } => {
+                assert_eq!(uri, "/api/v1/user?show_all=true&limit=10");
             }
             _ => panic!("not expected target found"),
         }
@@ -1565,14 +1527,10 @@ GET https://test.com:8080
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
-        let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
-            .parse()
-            .unwrap();
         assert_eq!(
             request.request_line.target,
             RequestTarget::Absolute {
-                uri: expected_uri,
-                string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
+                uri: "https://test.com:8080/get/html?id=123&value=test".to_owned()
             }
         );
         assert_eq!(request.request_line.http_version, WithDefault::default());
@@ -1596,14 +1554,10 @@ https://test.com:8080
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
-        let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
-            .parse()
-            .unwrap();
         assert_eq!(
             request.request_line.target,
             RequestTarget::Absolute {
-                uri: expected_uri,
-                string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
+                uri: "https://test.com:8080/get/html?id=123&value=test".to_owned()
             }
         );
         assert_eq!(request.request_line.http_version, WithDefault::default());
@@ -1624,14 +1578,10 @@ GET https://test.com:8080
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 1);
         let request = requests.remove(0);
-        let expected_uri = "https://test.com:8080/get/html?id=123&value=test"
-            .parse()
-            .unwrap();
         assert_eq!(
             request.request_line.target,
             RequestTarget::Absolute {
-                uri: expected_uri,
-                string: "https://test.com:8080/get/html?id=123&value=test".to_owned()
+                uri: "https://test.com:8080/get/html?id=123&value=test".to_owned()
             }
         );
         assert_eq!(
@@ -1821,7 +1771,7 @@ Content-Type: application/json
                         }]
                     },
                     Multipart {
-                        name: "data".to_string(), 
+                        name: "data".to_string(),
                         data: DataSource::FromFilepath("./request-form-data.json".to_string()),
                         fields: vec![DispositionField {
                             key: "filename".to_string(),
@@ -2005,8 +1955,7 @@ GET https://example.com
                         http_version: WithDefault::default(),
                         method: WithDefault::Some(HttpMethod::POST),
                         target: model::RequestTarget::Absolute {
-                            uri: "http://example.com/api/add".parse::<Uri>().unwrap(),
-                            string: "http://example.com/api/add".to_string()
+                            uri: "http://example.com/api/add".to_string()
                         }
                     },
                     settings: RequestSettings::default(),
@@ -2023,8 +1972,7 @@ GET https://example.com
                         http_version: WithDefault::default(),
                         method: WithDefault::Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
-                            uri: "https://example.com".parse::<Uri>().unwrap(),
-                            string: "https://example.com".to_string()
+                            uri: "https://example.com".to_string()
                         }
                     },
                     settings: RequestSettings::default(),
@@ -2041,8 +1989,7 @@ GET https://example.com
                         http_version: WithDefault::default(),
                         method: WithDefault::Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
-                            uri: "https://example.com".parse::<Uri>().unwrap(),
-                            string: "https://example.com".to_string()
+                            uri: "https://example.com".to_string()
                         }
                     },
                     settings: RequestSettings::default(),

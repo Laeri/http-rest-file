@@ -217,8 +217,8 @@ impl ToString for HttpMethod {
 
 #[derive(PartialEq, Debug)]
 pub enum RequestTarget {
-    RelativeOrigin { uri: http::Uri, string: String },
-    Absolute { uri: http::Uri, string: String },
+    RelativeOrigin { uri: String },
+    Absolute { uri: String },
     Asterisk,
     InvalidTarget(String),
 }
@@ -391,13 +391,11 @@ impl RequestTarget {
                 // if we have the authority (host:port) then it is an absolute url
                 if let Some(_authority) = uri.authority() {
                     Ok(RequestTarget::Absolute {
-                        uri,
-                        string: value.to_string(),
+                        uri: value.to_string(),
                     })
                 } else {
                     Ok(RequestTarget::RelativeOrigin {
-                        uri,
-                        string: value.to_string(),
+                        uri: value.to_string(),
                     })
                 }
             }
@@ -408,9 +406,8 @@ impl RequestTarget {
             Err(_err) => {
                 let fixed_value = format!("http://{}", value);
                 match fixed_value.parse::<http::Uri>() {
-                    Ok(uri) => Ok(RequestTarget::Absolute {
-                        uri,
-                        string: value.to_string(),
+                    Ok(_uri) => Ok(RequestTarget::Absolute {
+                        uri: value.to_string(),
                     }),
                     _ => Err(ParseError::new(
                         ParseErrorKind::InvalidTargetUrl,
@@ -426,8 +423,9 @@ impl RequestTarget {
     pub fn has_scheme(&self) -> bool {
         match self {
             RequestTarget::Asterisk => false,
-            RequestTarget::Absolute { uri, .. } => uri.scheme().is_some(),
-            RequestTarget::RelativeOrigin { uri, .. } => uri.scheme().is_some(),
+            RequestTarget::Absolute { uri, .. } | RequestTarget::RelativeOrigin { uri, .. } => uri
+                .parse::<http::Uri>()
+                .map_or(false, |uri| uri.scheme().is_some()),
             RequestTarget::InvalidTarget(_) => false,
         }
     }
@@ -634,7 +632,7 @@ impl std::fmt::Display for HttpVersion {
 pub struct RequestLine {
     pub method: WithDefault<HttpMethod>,
     pub target: RequestTarget,
-    pub http_version: WithDefault<HttpVersion>, // @TODO: use enum and validate
+    pub http_version: WithDefault<HttpVersion>,
 }
 
 impl From<&str> for RequestTarget {
@@ -662,8 +660,8 @@ impl ToString for RequestTarget {
     fn to_string(&self) -> String {
         match self {
             RequestTarget::Asterisk => "*",
-            RequestTarget::Absolute { string, .. } => string,
-            RequestTarget::RelativeOrigin { string, .. } => string,
+            RequestTarget::Absolute { uri, .. } => uri,
+            RequestTarget::RelativeOrigin { uri, .. } => uri,
             RequestTarget::InvalidTarget(target) => target,
         }
         .to_string()
