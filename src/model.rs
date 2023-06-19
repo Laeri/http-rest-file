@@ -1,4 +1,12 @@
+#[cfg(feature = "rspc")]
+use rspc::Type;
+
+use serde::{Deserialize, Serialize};
+
+use std::{borrow::Cow, path::PathBuf};
+
 #[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ParseErrorKind {
     // General error
     General,
@@ -30,9 +38,12 @@ pub enum ParseErrorKind {
     NoRequestFoundInFile,
     // path to read file from is not valid
     InvalidFilePath,
+    // Response redirect should have form '>> <some/path>' or '>>! <some/path>'
+    InvalidSaveResponseRedirect,
 }
 
 #[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ParseError {
     pub kind: ParseErrorKind,
     pub message: String,
@@ -105,8 +116,28 @@ impl<T: std::fmt::Debug> std::fmt::Debug for WithDefault<T> {
 
 impl<T> WithDefault<T> {
     #[allow(dead_code)]
-    fn default_fn(f: Box<dyn Fn() -> T>) -> Self {
+    pub fn new_default_fn(f: Box<dyn Fn() -> T>) -> Self {
         WithDefault::DefaultFn(f)
+    }
+
+    pub fn with_default(value: Option<T>, default: T) -> Self {
+        match value {
+            Some(value) => WithDefault::Some(value),
+            None => WithDefault::Default(default),
+        }
+    }
+
+    pub fn with_default_fn(value: Option<T>, default_fn: Box<dyn Fn() -> T>) -> Self {
+        match value {
+            Some(value) => WithDefault::Some(value),
+            None => WithDefault::DefaultFn(default_fn),
+        }
+    }
+}
+
+impl<T> From<T> for WithDefault<T> {
+    fn from(value: T) -> Self {
+        WithDefault::Some(value)
     }
 }
 
@@ -122,24 +153,43 @@ where
     }
 }
 
+impl<T> From<WithDefault<T>> for Option<T> {
+    fn from(value: WithDefault<T>) -> Option<T> {
+        match value {
+            WithDefault::Some(val) => Some(val),
+            _ => None,
+        }
+    }
+}
+
 impl<T> Default for WithDefault<T>
 where
-    T: Default + std::fmt::Debug,
+    T: Default,
 {
     fn default() -> Self {
         WithDefault::Default(T::default())
     }
 }
 
-impl Default for WithDefault<HttpVersion> {
-    fn default() -> Self {
-        WithDefault::Default(HttpVersion { major: 1, minor: 1 })
+impl<T: ToOwned<Owned = T>> WithDefault<T> {
+    #[allow(dead_code)]
+    pub fn get_cloned_or_computed(&self) -> T {
+        match self {
+            WithDefault::Some(val) => val.to_owned(),
+            WithDefault::Default(val) => val.to_owned(),
+            WithDefault::DefaultFn(func) => func(),
+        }
     }
 }
 
-impl Default for WithDefault<HttpMethod> {
-    fn default() -> Self {
-        WithDefault::Default(HttpMethod::GET)
+impl<T: Clone> WithDefault<T> {
+    #[allow(dead_code)]
+    pub fn get_ref_or_default<'a>(&'a self) -> Cow<'a, T> {
+        match self {
+            WithDefault::Some(val) => Cow::Borrowed(val),
+            WithDefault::Default(val) => Cow::Borrowed(val),
+            WithDefault::DefaultFn(func) => Cow::Owned(func()),
+        }
     }
 }
 
@@ -169,6 +219,33 @@ impl<T: Clone> WithDefault<T> {
     }
 }
 
+impl<T: std::cmp::PartialOrd> PartialOrd for WithDefault<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let first_computed;
+        let second_computed;
+
+        let first_ref = match self {
+            WithDefault::Default(default) => default,
+            WithDefault::Some(value) => value,
+            WithDefault::DefaultFn(default_fn) => {
+                first_computed = Some(default_fn());
+                first_computed.as_ref().unwrap()
+            }
+        };
+
+        let second_ref = match other {
+            WithDefault::Default(default) => default,
+            WithDefault::Some(value) => value,
+            WithDefault::DefaultFn(default_fn) => {
+                second_computed = Some(default_fn());
+                second_computed.as_ref().unwrap()
+            }
+        };
+
+        first_ref.partial_cmp(second_ref)
+    }
+}
+
 impl<T: std::cmp::PartialEq> PartialEq for WithDefault<T> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -183,7 +260,9 @@ impl<T: std::cmp::PartialEq> PartialEq for WithDefault<T> {
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(PartialEq, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum HttpMethod {
     GET,
     POST,
@@ -215,7 +294,32 @@ impl ToString for HttpMethod {
     }
 }
 
+impl HttpMethod {
+    pub fn new(s: &str) -> Self {
+        match s {
+            "GET" => HttpMethod::GET,
+            "PUT" => HttpMethod::PUT,
+            "POST" => HttpMethod::POST,
+            "PATCH" => HttpMethod::PATCH,
+            "DELETE" => HttpMethod::DELETE,
+            "HEAD" => HttpMethod::HEAD,
+            "OPTIONS" => HttpMethod::OPTIONS,
+            "CONNECT " => HttpMethod::CONNECT,
+            "TRACE" => HttpMethod::TRACE,
+            custom => HttpMethod::CUSTOM(custom.to_string()),
+        }
+    }
+}
+
+impl Default for HttpMethod {
+    fn default() -> Self {
+        HttpMethod::GET
+    }
+}
+
 #[derive(PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum RequestTarget {
     RelativeOrigin { uri: String },
     Absolute { uri: String },
@@ -223,21 +327,23 @@ pub enum RequestTarget {
     InvalidTarget(String),
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum SettingsEntry {
     NoRedirect,
     NoLog,
     NoCookieJar,
-    UseOsCredentials,
     NameEntry(String),
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub struct RequestSettings {
     pub no_redirect: Option<bool>,
     pub no_log: Option<bool>,
     pub no_cookie_jar: Option<bool>,
-    pub use_os_credentials: Option<bool>,
 }
 
 impl Default for RequestSettings {
@@ -246,7 +352,6 @@ impl Default for RequestSettings {
             no_redirect: Some(false),
             no_log: Some(false),
             no_cookie_jar: Some(false),
-            use_os_credentials: Some(false),
         }
     }
 }
@@ -257,7 +362,6 @@ impl RequestSettings {
             SettingsEntry::NoLog => self.no_log = Some(true),
             SettingsEntry::NoRedirect => self.no_redirect = Some(true),
             SettingsEntry::NoCookieJar => self.no_cookie_jar = Some(true),
-            SettingsEntry::UseOsCredentials => self.use_os_credentials = Some(true),
             // do nothing with name, is stored directly on the request
             SettingsEntry::NameEntry(_name) => (),
         }
@@ -276,20 +380,34 @@ impl RequestSettings {
         if let Some(true) = self.no_cookie_jar {
             result.push_str("# @no-cookie-jar\n");
         }
-        if let Some(true) = self.use_os_credentials {
-            result.push_str("# @use-os-credentials\n");
-        }
         result
     }
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub struct DispositionField {
     pub key: String,
     pub value: String,
 }
 
+impl DispositionField {
+    pub fn new<S, T>(key: S, value: T) -> Self
+    where
+        S: Into<String>,
+        T: Into<String>,
+    {
+        DispositionField {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
 #[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub struct Multipart {
     pub name: String,
     pub data: DataSource<String>,
@@ -297,10 +415,12 @@ pub struct Multipart {
     pub headers: Vec<Header>,
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum DataSource<T> {
     Raw(T),
-    FromFilepath(T),
+    FromFilepath(String),
 }
 
 impl ToString for DataSource<String> {
@@ -312,15 +432,43 @@ impl ToString for DataSource<String> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
+pub struct UrlEncodedParam {
+    pub key: String,
+    pub value: String,
+}
+
+impl UrlEncodedParam {
+    pub fn new<S, T>(key: S, value: T) -> Self
+    where
+        S: Into<String>,
+        T: Into<String>,
+    {
+        UrlEncodedParam {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum RequestBody {
     None,
+
     Multipart {
         boundary: String,
         parts: Vec<Multipart>,
     },
-    //@TODO
-    Text {
+
+    UrlEncoded {
+        url_encoded_params: Vec<UrlEncodedParam>,
+    },
+
+    Raw {
         data: DataSource<String>,
     },
 }
@@ -340,6 +488,13 @@ impl ToString for RequestBody {
     fn to_string(&self) -> String {
         match self {
             RequestBody::None => "".to_string(),
+            RequestBody::UrlEncoded { url_encoded_params } => {
+                let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+                url_encoded_params.iter().for_each(|param| {
+                    serializer.append_pair(&param.key, &param.value);
+                });
+                serializer.finish()
+            }
             RequestBody::Multipart { boundary, parts } => {
                 let mut multipart_res = String::new();
 
@@ -376,7 +531,7 @@ impl ToString for RequestBody {
                 multipart_res.push_str(&format!("--{}--", boundary));
                 multipart_res
             }
-            RequestBody::Text { data } => data.to_string(),
+            RequestBody::Raw { data } => data.to_string(),
         }
     }
 }
@@ -432,6 +587,8 @@ impl RequestTarget {
 }
 
 #[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub struct Header {
     pub key: String,
     pub value: String,
@@ -454,10 +611,30 @@ impl ToString for Header {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum HttpRestFileExtension {
     Http,
     Rest,
+}
+
+impl HttpRestFileExtension {
+    pub fn get_extension(&self) -> String {
+        match self {
+            HttpRestFileExtension::Http => ".http".to_string(),
+            HttpRestFileExtension::Rest => ".rest".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for HttpRestFileExtension {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpRestFileExtension::Http => f.write_str("http"),
+            HttpRestFileExtension::Rest => f.write_str("rest"),
+        }
+    }
 }
 
 impl HttpRestFileExtension {
@@ -479,6 +656,8 @@ pub struct HttpRestFile {
 }
 
 #[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PreRequestScript {
     FromFilepath(String),
     Script(String),
@@ -496,22 +675,25 @@ impl ToString for PreRequestScript {
 }
 
 #[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum ResponseHandler {
     FromFilepath(String),
     Script(String),
 }
 
-#[derive(PartialEq, Debug, Clone)]
-pub enum Redirect {
-    NewFileIfExists(String),
-    RewriteFile(String),
+#[derive(PartialEq, Debug, Clone, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
+///https://www.jetbrains.com/help/idea/http-client-in-product-code-editor.html#redirect-output-to-a-custom-file-or-directory
+pub enum SaveResponse {
+    // save the response into a new file if there exists already an existing save (use incremental
+    // numbering for filename)
+    NewFileIfExists(std::path::PathBuf),
+    // save the response to a file and overwrite it if present
+    RewriteFile(std::path::PathBuf),
 }
 
-#[derive(PartialEq, Debug)]
-pub struct RequestFile {
-    pub path: String,
-    pub requests: Vec<Request>,
-}
 
 #[derive(PartialEq, Debug)]
 pub struct Request {
@@ -523,7 +705,7 @@ pub struct Request {
     pub settings: RequestSettings,
     pub pre_request_script: Option<PreRequestScript>,
     pub response_handler: Option<ResponseHandler>,
-    pub redirect: Option<Redirect>,
+    pub save_response: Option<SaveResponse>,
 }
 
 impl Default for Request {
@@ -537,12 +719,14 @@ impl Default for Request {
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         }
     }
 }
 
 #[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub enum CommentKind {
     // //
     DoubleSlash,
@@ -581,6 +765,8 @@ impl std::str::FromStr for CommentKind {
 }
 
 #[derive(PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub struct Comment {
     pub value: String,
     pub kind: CommentKind,
@@ -596,27 +782,46 @@ impl ToString for Comment {
     }
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 pub struct HttpVersion {
     pub major: u32,
     pub minor: u32,
 }
 
+impl Default for HttpVersion {
+    fn default() -> Self {
+        HttpVersion { major: 1, minor: 1 }
+    }
+}
+
 impl std::str::FromStr for HttpVersion {
     type Err = ParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let err =  ParseError::new(ParseErrorKind::InvalidHttpVersion,String::from("Http version requires format: 'HTTP/\\d+.\\d+'. 
+        println!("STRING: {}", s);
+        let err =  ParseError::new(ParseErrorKind::InvalidHttpVersion,String::from("Http version requires format: 'HTTP/\\d+.\\d+' or 'HTTP/\\d+'. 
 For example 'HTTP/2.1'. You can also omit the version and only specify the url target of the request or the http method and the url target.
                 "));
         if !s.starts_with("HTTP/") {
             return Err(err);
         }
+        // @TODO: string can also have form HTTP/2 200, at least returned from the client, maybe
+        // check if we can remove it there already...
+        let s = if s.contains(" ") {
+            s.split(" ").next().unwrap_or("")
+        } else {
+            s
+        };
         let rest = &s[5..].to_string();
-        let mut split = rest.split('.');
-        let major = split.next().map(|v| v.parse::<u32>());
-        let minor = split.next().map(|v| v.parse::<u32>());
+        let mut split = dbg!(rest).split('.');
+        let major = dbg!(split.next()).map(|v| v.parse::<u32>());
+        // if no minor version is present, then we assume it is 2.0 --> @TODO: is this ok?
+        let minor = split.next().map(|v| v.parse::<u32>()).unwrap_or(Ok(0));
+        println!("MAJOR: {:?}", major);
+        println!("MINOR: {:?}", minor);
         match (major, minor) {
-            (Some(Ok(major)), Some(Ok(minor))) => Ok(HttpVersion { major, minor }),
+            (Some(Ok(major)), Ok(minor)) => Ok(HttpVersion { major, minor }),
             _ => Err(err),
         }
     }
@@ -651,7 +856,7 @@ impl Default for RequestLine {
         RequestLine {
             method: WithDefault::Default(HttpMethod::GET),
             target: RequestTarget::from(""),
-            http_version: WithDefault::Default(HttpVersion { major: 1, minor: 1 }),
+            http_version: WithDefault::Default(HttpVersion::default()),
         }
     }
 }
@@ -670,12 +875,21 @@ impl ToString for RequestTarget {
 
 impl Request {
     #[allow(dead_code)]
-    pub fn get_comment_text(&self) -> String {
-        self.comments
-            .iter()
-            .map(|b| b.value.clone())
-            .collect::<Vec<String>>()
-            .join("\n")
+    pub fn get_comment_text(&self) -> Option<String> {
+        if self.comments.is_empty() {
+            return None;
+        }
+        Some(
+            self.comments
+                .iter()
+                .map(|b| b.value.clone())
+                .collect::<Vec<String>>()
+                .join("\n"),
+        )
+    }
+
+    pub fn get_url(&self) -> String {
+        self.request_line.target.to_string()
     }
 }
 
@@ -716,7 +930,7 @@ mod tests {
             WithDefault::Some(HttpVersion { major: 1, minor: 1 }).is_default(),
             false
         );
-        assert!(WithDefault::default_fn(Box::new(|| 1)).is_default());
+        assert!(WithDefault::new_default_fn(Box::new(|| 1)).is_default());
         assert!(
             WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 1, minor: 1 })).is_default()
         );

@@ -8,7 +8,7 @@ pub struct Scanner {
 
 #[derive(PartialEq, Debug)]
 pub enum ScanError {
-    EndOfLine, // end of line reached during parsing
+    EndOfLine,                     // end of line reached during parsing
     InvalidRegexCaptureConversion, // regex with capture groups could not be converted
 }
 
@@ -178,7 +178,6 @@ impl Scanner {
         self.characters[start..end].iter().collect::<String>()
     }
 
-
     // Return the character under the cursor without advancing
     pub fn peek(&self) -> Option<&char> {
         self.characters.get(self.cursor)
@@ -332,11 +331,11 @@ impl Scanner {
         if !regex_str.starts_with('^') {
             regex_str = format!("^{}", user_regex_str);
         }
-        let regex = regex::bytes::Regex::new(&regex_str)?;
+        let regex = regex::bytes::Regex::new(&dbg!(regex_str))?;
 
-        let string_tmp = self.characters[self.cursor..].iter().collect::<String>();
+        let string_tmp = dbg!(self.characters[self.cursor..].iter().collect::<String>());
         let bytes = string_tmp.as_bytes();
-        return match regex.captures(bytes) {
+        return match dbg!(regex.captures(bytes)) {
             Some(comment_captures) => {
                 let mut str_captures: Vec<String> = Vec::new();
 

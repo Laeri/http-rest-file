@@ -3,10 +3,10 @@ pub use crate::scanner::Scanner;
 use crate::{
     model,
     model::{
-        CommentKind, DataSource, FileParseResult, HttpRestFile, HttpRestFileExtension, ParseError,
-        ParseErrorKind, Redirect, RequestSettings, ResponseHandler, SettingsEntry,
+        CommentKind, DataSource, FileParseResult, Header, HttpRestFile, HttpRestFileExtension,
+        ParseError, ParseErrorKind, SaveResponse, RequestBody, RequestSettings, ResponseHandler,
+        SettingsEntry, UrlEncodedParam,
     },
-    parser::model::HttpMethod,
     scanner::{LineIterator, WS_CHARS},
 };
 pub use http::Uri;
@@ -195,11 +195,11 @@ impl Parser {
                     request_line,
                     // no headers nor body parsed
                     headers: vec![],
-                    body: model::RequestBody::None,
+                    body: RequestBody::None,
                     settings: request_settings,
                     pre_request_script,
                     response_handler: None,
-                    redirect: None,
+                    save_response: None
                 };
                 return Ok((request_node, parse_errs));
             }
@@ -224,9 +224,9 @@ impl Parser {
         };
         scanner.skip_empty_lines();
 
-        let mut redirect: Option<Redirect> = None;
+        let mut save_response: Option<SaveResponse> = None;
         if let Ok(Some(result)) = Parser::parse_redirect(scanner) {
-            redirect = Some(result);
+            save_response = Some(result);
         }
         scanner.skip_empty_lines();
 
@@ -239,7 +239,7 @@ impl Parser {
             settings: request_settings,
             pre_request_script,
             response_handler,
-            redirect,
+            save_response,
         };
 
         // if no name set we use the first comment as name
@@ -335,7 +335,6 @@ impl Parser {
                 "@no-cookie-jar" => Some(Ok(SettingsEntry::NoCookieJar)),
                 "@no-redirect" => Some(Ok(SettingsEntry::NoRedirect)),
                 "@no-log" => Some(Ok(SettingsEntry::NoLog)),
-                "@use-os-credentials" => Some(Ok(SettingsEntry::UseOsCredentials)),
                 // Non matching meta comment lines are taken as regular comments
                 _ => None,
             };
@@ -418,18 +417,8 @@ impl Parser {
     }
     // @TODO: create a macro that generates a match statement for each enum variant
     fn match_request_method(str: &str) -> model::HttpMethod {
-        match str {
-            "GET" => HttpMethod::GET,
-            "PUT" => HttpMethod::PUT,
-            "POST" => HttpMethod::POST,
-            "PATCH" => HttpMethod::PATCH,
-            "DELETE" => HttpMethod::DELETE,
-            "HEAD" => HttpMethod::HEAD,
-            "OPTIONS" => HttpMethod::OPTIONS,
-            "CONNECT " => HttpMethod::CONNECT,
-            "TRACE" => HttpMethod::TRACE,
-            custom => HttpMethod::CUSTOM(custom.to_string()),
-        }
+        // if not one of the well known methods then it is a custom method
+        model::HttpMethod::new(str)
     }
 
     /// Parse a request line of the form '[method required-whitespace] request-target [required-whitespace http-version]'
@@ -626,118 +615,159 @@ You have additional elements: '{}'",
     /// Parse the body of an http request. Can either be multipart or contain some kind of data.
     /// The Jetbrains client trims the data so trailing newlines or whitespace is also ignored when
     /// parsing here
-    fn parse_body(
-        scanner: &mut Scanner,
-        headers: &[model::Header],
-    ) -> (model::RequestBody, Vec<ParseError>) {
-        let mut body = model::RequestBody::None;
+    fn parse_body(scanner: &mut Scanner, headers: &[Header]) -> (RequestBody, Vec<ParseError>) {
         let mut parse_errs: Vec<ParseError> = Vec::new();
-        // if a multipart header is present for the request try to parse as multipart body
-        if let Some(multipart_header) = headers.iter().find(|header| {
-            header.key == "Content-Type" && header.value.starts_with("multipart/form-data")
-        }) {
-            let boundary_regex =
-                regex::Regex::from_str("multipart/form-data\\s*;\\s*boundary\\s*=\\s*(.+)")
-                    .unwrap();
-            let captures = boundary_regex.captures(&multipart_header.value);
+        let content_type = headers
+            .iter()
+            .find(|header| {
+                header.key == "Content-Type" //&& header.value.starts_with("multipart/form-data")
+            })
+            .map(|header| header.value.as_str());
 
-            if let Some(captures) = captures {
-                let boundary_match = captures.get(1);
-
-                // either with or without quotes
-                if boundary_match.is_none() {
-                    let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
-                    parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg));
-                }
-                let mut boundary = boundary_match.unwrap().as_str();
-                if boundary.starts_with('"') && boundary.ends_with('"') {
-                    boundary = &boundary[1..(boundary.len() - 1)];
-                }
-                if let Err(boundary_err) = Parser::is_multipart_boundary_valid(boundary) {
-                    parse_errs.push(boundary_err);
-                }
-                match Parser::parse_multipart_body(scanner, boundary) {
-                    Ok(multipart_body) => body = multipart_body,
-                    Err(err) => parse_errs.push(err),
-                };
-            } else {
-                let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", multipart_header.value);
-                parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg))
+        let body = match content_type {
+            Some(content_type) if content_type.starts_with("multipart/form-data") => {
+                Parser::parse_content_type_form_data(scanner, content_type, &mut parse_errs)
+                    .unwrap_or(RequestBody::None)
             }
-
-        // If not a multipart body then just parse the data
-        } else {
-            if scanner.is_done() {
-                return (body, parse_errs);
+            Some("application/x-www-form-urlencoded") => {
+                println!("HERE");
+                Parser::parse_body_urlencoded(scanner, &mut parse_errs)
             }
+            _ => Parser::parse_raw_body(scanner, &mut parse_errs),
+        };
 
-            let start_pos = scanner.get_pos();
-            loop {
-                let peek_line = scanner.peek_line();
-                if peek_line.is_none() {
-                    break;
-                }
-                let peek_line = peek_line.unwrap();
-                // new request starts
-                if peek_line.starts_with(REQUEST_SEPARATOR) {
-                    break;
-                }
-
-                // response handler
-                if peek_line.starts_with('>') {
-                    // if previous line is empty then do not parse it as body before response
-                    // handler, when serializing we put an additional new line for clarity that
-                    // should not be part of the body
-                    if scanner
-                        .get_prev_line()
-                        .map_or(false, |l| l.trim().is_empty())
-                    {
-                        scanner.step_to_previous_line_start();
-                    }
-                    break;
-                }
-
-                // output handler / redirect also ends body
-                if peek_line.starts_with(">>") {
-                    // if previous line is empty then do not parse it as body before redirect
-                    // when serializing we add an additional newline before the redirect for
-                    // clarity which should not be part of the body
-                    if scanner
-                        .get_prev_line()
-                        .map_or(false, |l| l.trim().is_empty())
-                    {
-                        scanner.step_to_previous_line_start();
-                    }
-                    break;
-                }
-                scanner.skip_to_next_line();
-            }
-            let mut end_pos = scanner.get_pos();
-            if start_pos > end_pos {
-                end_pos = start_pos.clone();
-            }
-            let body_str = scanner.get_from_to(start_pos, end_pos);
-            if body_str.trim().starts_with('<') {
-                let path = body_str.split('<').nth(1).unwrap().trim();
-                body = model::RequestBody::Text {
-                    data: DataSource::FromFilepath(path.to_string()),
-                };
-            } else if !body_str.is_empty() {
-                body = model::RequestBody::Text {
-                    // We trim trailing newlines, jetbrains client does the same
-                    // However, this means a text body cannot contain trailing newlines @TODO
-                    data: DataSource::Raw(body_str.trim_end_matches('\n').to_string()),
-                };
-            }
-        }
         (body, parse_errs)
+    }
+
+    fn parse_content_type_form_data(
+        scanner: &mut Scanner,
+        content_type: &str,
+        parse_errs: &mut Vec<ParseError>,
+    ) -> Option<RequestBody> {
+        let boundary_regex =
+            regex::Regex::from_str("multipart/form-data\\s*;\\s*boundary\\s*=\\s*(.+)").unwrap();
+        let captures = boundary_regex.captures(content_type);
+
+        if let Some(captures) = captures {
+            let boundary_match = captures.get(1);
+
+            // either with or without quotes
+            if boundary_match.is_none() {
+                let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", content_type);
+                parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg));
+            }
+            let mut boundary = boundary_match.unwrap().as_str();
+            if boundary.starts_with('"') && boundary.ends_with('"') {
+                boundary = &boundary[1..(boundary.len() - 1)];
+            }
+            if let Err(boundary_err) = Parser::is_multipart_boundary_valid(boundary) {
+                parse_errs.push(boundary_err);
+            }
+            match Parser::parse_multipart_body(scanner, boundary) {
+                Ok(multipart_body) => return Some(multipart_body),
+                Err(err) => parse_errs.push(err),
+            };
+        } else {
+            let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", content_type);
+            parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg))
+        }
+        None
+    }
+
+    fn parse_body_urlencoded(
+        scanner: &mut Scanner,
+        _parse_errs: &mut Vec<ParseError>,
+    ) -> RequestBody {
+        let mut url_encoded_params: Vec<UrlEncodedParam> = Vec::new();
+        if let Ok(Some(matches)) = scanner.match_regex_forward("(.*)[\r\n]+(###|$)") {
+            println!("GOT matches: {:?}", matches);
+            let body_content = matches.get(0).unwrap().trim();
+            url_encoded_params = body_content
+                .split("&")
+                .into_iter()
+                .map(|key_val| {
+                    let mut split = key_val.split("=");
+                    let key = split.next();
+                    let value = split.next();
+                    UrlEncodedParam::new(key.unwrap_or_default(), value.unwrap_or_default())
+                })
+                .collect::<Vec<UrlEncodedParam>>();
+        };
+        RequestBody::UrlEncoded { url_encoded_params }
+    }
+
+    fn parse_raw_body(scanner: &mut Scanner, _parse_errs: &mut Vec<ParseError>) -> RequestBody {
+        if scanner.is_done() {
+            return RequestBody::None;
+        }
+
+        let start_pos = scanner.get_pos();
+        loop {
+            let peek_line = scanner.peek_line();
+            if peek_line.is_none() {
+                break;
+            }
+            let peek_line = peek_line.unwrap();
+            // new request starts
+            if peek_line.starts_with(REQUEST_SEPARATOR) {
+                break;
+            }
+
+            // response handler
+            if peek_line.starts_with('>') {
+                // if previous line is empty then do not parse it as body before response
+                // handler, when serializing we put an additional new line for clarity that
+                // should not be part of the body
+                if scanner
+                    .get_prev_line()
+                    .map_or(false, |l| l.trim().is_empty())
+                {
+                    scanner.step_to_previous_line_start();
+                }
+                break;
+            }
+
+            // output handler / redirect also ends body
+            if peek_line.starts_with(">>") {
+                // if previous line is empty then do not parse it as body before redirect
+                // when serializing we add an additional newline before the redirect for
+                // clarity which should not be part of the body
+                if scanner
+                    .get_prev_line()
+                    .map_or(false, |l| l.trim().is_empty())
+                {
+                    scanner.step_to_previous_line_start();
+                }
+                break;
+            }
+            scanner.skip_to_next_line();
+        }
+        let mut end_pos = scanner.get_pos();
+        if start_pos > end_pos {
+            end_pos = start_pos.clone();
+        }
+        let body_str = scanner.get_from_to(start_pos, end_pos);
+        if body_str.trim().starts_with('<') {
+            let path = body_str.split('<').nth(1).unwrap().trim();
+            RequestBody::Raw {
+                data: DataSource::FromFilepath(path.to_string()),
+            }
+        } else if !body_str.is_empty() {
+            // We trim trailing newlines, jetbrains client does the same
+            // However, this means a text body cannot contain trailing newlines @TODO
+            RequestBody::Raw {
+                data: DataSource::Raw(body_str.trim_end_matches('\n').to_string()),
+            }
+        } else {
+            RequestBody::None
+        }
     }
 
     /// Parse a multipart http body
     fn parse_multipart_body(
         scanner: &mut Scanner,
         boundary: &str,
-    ) -> Result<model::RequestBody, ParseError> {
+    ) -> Result<RequestBody, ParseError> {
         scanner.skip_empty_lines();
 
         let mut parts: Vec<Multipart> = Vec::new();
@@ -770,7 +800,7 @@ You have additional elements: '{}'",
                 ));
             }
         }
-        Ok(model::RequestBody::Multipart {
+        Ok(RequestBody::Multipart {
             boundary: boundary.to_string(),
             parts,
         })
@@ -1063,7 +1093,7 @@ You have additional elements: '{}'",
 
     /// Parse a redirect line. A redirect can specify where the response of an http request should
     /// be saved. A redirect line either has the form `>> <some/path>` or `>>! <some/path>`
-    fn parse_redirect(scanner: &mut Scanner) -> Result<Option<Redirect>, ParseError> {
+    fn parse_redirect(scanner: &mut Scanner) -> Result<Option<SaveResponse>, ParseError> {
         scanner.skip_empty_lines();
         let start_pos = scanner.get_pos();
         if !scanner.match_str_forward(">>") {
@@ -1089,9 +1119,9 @@ You have additional elements: '{}'",
         let path = path.unwrap().trim().to_string();
 
         if rewrite {
-            Ok(Some(Redirect::RewriteFile(path)))
+            Ok(Some(SaveResponse::RewriteFile(std::path::PathBuf::from(path))))
         } else {
-            Ok(Some(Redirect::NewFileIfExists(path)))
+            Ok(Some(SaveResponse::NewFileIfExists(std::path::PathBuf::from(path))))
         }
     }
 }
@@ -1099,7 +1129,7 @@ You have additional elements: '{}'",
 #[cfg(test)]
 mod tests {
     use crate::{
-        model::{Comment, DispositionField, Request, RequestLine},
+        model::{Comment, DispositionField, Request, RequestLine, HttpMethod},
         parser::model::{Header, HttpVersion},
     };
 
@@ -1127,7 +1157,7 @@ https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         }];
 
         assert!(parsed.errs.is_empty());
@@ -1156,7 +1186,7 @@ https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         }];
 
         assert!(parsed.errs.is_empty());
@@ -1207,7 +1237,7 @@ CUSTOMVERB https://httpbin.org
             name: Some(String::from("test name")),
             comments: Vec::new(),
             request_line: model::RequestLine {
-                method: WithDefault::Some(HttpMethod::CUSTOM("CUSTOMVERB".to_string())),
+                method: WithDefault::Some(model::HttpMethod::CUSTOM("CUSTOMVERB".to_string())),
                 target: RequestTarget::from("https://httpbin.org"),
                 http_version: WithDefault::default(),
             },
@@ -1216,7 +1246,7 @@ CUSTOMVERB https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         }];
 
         assert!(parsed.errs.is_empty());
@@ -1245,7 +1275,7 @@ POST https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         }];
 
         assert!(parsed.errs.is_empty());
@@ -1274,7 +1304,7 @@ POST https://httpbin.org
             settings: RequestSettings::default(),
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         }];
 
         // whitespace before or after name should be removed
@@ -1298,7 +1328,10 @@ POST https://httpbin.org
         assert!(parsed.errs.is_empty());
         assert_eq!(
             parsed.requests[0].get_comment_text(),
-            "Comment one\nComment line two    \nThis comment type is also allowed      ",
+            Some(
+                "Comment one\nComment line two    \nThis comment type is also allowed      "
+                    .to_string()
+            ),
             "parsed: {:?}, {:?}",
             parsed.requests,
             parsed.errs
@@ -1875,7 +1908,7 @@ Content-Type: application/json
 
         assert_eq!(
             request.body,
-            model::RequestBody::Text {
+            model::RequestBody::Raw {
                 data: DataSource::Raw(
                     r#"{
     "key": "my-dev-value"
@@ -1910,8 +1943,42 @@ Content-Type: application/json
         // @TODO check content
         assert_eq!(
             request.body,
-            model::RequestBody::Text {
+            model::RequestBody::Raw {
                 data: DataSource::FromFilepath("./input.json".to_string())
+            }
+        )
+    }
+
+    #[test]
+    pub fn parse_url_form_encoded() {
+        let str = r####"
+POST https://test.com/formEncoded
+Content-Type: application/x-www-form-urlencoded
+
+firstKey=firstValue&secondKey=secondValue&empty=
+"####;
+
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
+
+        assert_eq!(
+            request.headers,
+            vec![Header::new(
+                "Content-Type",
+                "application/x-www-form-urlencoded"
+            )]
+        );
+
+        assert_eq!(
+            request.body,
+            RequestBody::UrlEncoded {
+                url_encoded_params: vec![
+                    UrlEncodedParam::new("firstKey", "firstValue"),
+                    UrlEncodedParam::new("secondKey", "secondValue"),
+                    UrlEncodedParam::new("empty", ""),
+                ]
             }
         )
     }
@@ -1948,7 +2015,7 @@ GET https://example.com
                         key: "Content-Type".to_string(),
                         value: "application/json".to_string()
                     }],
-                    body: model::RequestBody::Text {
+                    body: model::RequestBody::Raw {
                         data: DataSource::FromFilepath("./input.json".to_string())
                     },
                     request_line: model::RequestLine {
@@ -1961,7 +2028,7 @@ GET https://example.com
                     settings: RequestSettings::default(),
                     pre_request_script: None,
                     response_handler: None,
-                    redirect: None,
+                    save_response: None,
                 },
                 model::Request {
                     name: None,
@@ -1978,7 +2045,7 @@ GET https://example.com
                     settings: RequestSettings::default(),
                     pre_request_script: None,
                     response_handler: None,
-                    redirect: None,
+                    save_response: None,
                 },
                 model::Request {
                     name: None,
@@ -1995,7 +2062,7 @@ GET https://example.com
                     settings: RequestSettings::default(),
                     pre_request_script: None,
                     response_handler: None,
-                    redirect: None
+                    save_response: None
                 }
             ],
         );
@@ -2028,7 +2095,6 @@ GET https://httpbin.org
                     no_redirect: Some(true),
                     no_log: Some(true),
                     no_cookie_jar: Some(true),
-                    use_os_credentials: Some(true),
                 },
                 request_line: RequestLine {
                     method: WithDefault::Some(HttpMethod::GET),
@@ -2038,7 +2104,7 @@ GET https://httpbin.org
                 body: model::RequestBody::None,
                 pre_request_script: None,
                 response_handler: None,
-                redirect: None
+                save_response: None
             }
         );
     }
@@ -2064,7 +2130,6 @@ GET https://httpbin.org
                     no_redirect: Some(false),
                     no_log: Some(true),
                     no_cookie_jar: Some(false),
-                    use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
                     method: WithDefault::Some(HttpMethod::GET),
@@ -2076,7 +2141,7 @@ GET https://httpbin.org
                     r#"     request.variables.set("firstname", "John") "#.to_string()
                 )),
                 response_handler: None,
-                redirect: None
+                save_response: None
             }
         );
     }
@@ -2127,7 +2192,6 @@ GET https://httpbin.org
                     no_redirect: Some(false),
                     no_log: Some(true),
                     no_cookie_jar: Some(false),
-                    use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
                     method: WithDefault::Some(HttpMethod::GET),
@@ -2139,7 +2203,7 @@ GET https://httpbin.org
                     pre_request_script.to_string()
                 )),
                 response_handler: None,
-                redirect: None,
+                save_response: None,
             }
         );
     }
@@ -2169,7 +2233,6 @@ GET https://httpbin.org
                     no_redirect: Some(false),
                     no_log: Some(true),
                     no_cookie_jar: Some(false),
-                    use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
                     method: WithDefault::Some(HttpMethod::GET),
@@ -2181,7 +2244,7 @@ GET https://httpbin.org
                 response_handler: Some(ResponseHandler::Script(
                     response_handler_script.to_string()
                 )),
-                redirect: None
+                save_response: None
             }
         );
     }
@@ -2216,7 +2279,6 @@ GET https://httpbin.org
                     no_redirect: Some(false),
                     no_log: Some(true),
                     no_cookie_jar: Some(false),
-                    use_os_credentials: Some(false),
                 },
                 request_line: RequestLine {
                     method: WithDefault::Some(HttpMethod::GET),
@@ -2228,7 +2290,7 @@ GET https://httpbin.org
                 response_handler: Some(ResponseHandler::Script(
                     response_handler_script.to_string()
                 )),
-                redirect: None
+                save_response: None
             }
         );
     }

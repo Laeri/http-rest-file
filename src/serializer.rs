@@ -1,4 +1,4 @@
-use crate::model::{self, CommentKind, RequestFile, ResponseHandler, WithDefault};
+use crate::model::{self, CommentKind, HttpRestFile, ResponseHandler, WithDefault};
 
 #[derive(PartialEq, Debug, Clone)]
 pub enum SerializeError {
@@ -9,14 +9,19 @@ pub enum SerializeError {
 pub struct Serializer {}
 
 impl Serializer {
-    /// Serializes the request models within a `RequestFile` to the `RequestFile.path`
-    pub fn serialize_to_file(file_model: &RequestFile) -> Result<(), SerializeError> {
+    /// Serializes the request models within a `HttpRestFile` to the `HttpRestFile.path`
+    pub fn serialize_to_file(file_model: &HttpRestFile) -> Result<(), SerializeError> {
+        let mut path = (*file_model.path).clone();
+        if let Some(ext) = file_model.extension.as_ref() {
+            path = file_model.path.with_extension(ext.to_string());
+        }
         let content = Serializer::serialize_requests(
             &file_model.requests.iter().collect::<Vec<&model::Request>>()[..],
         );
-        let path = std::path::PathBuf::from(&file_model.path);
 
-        match std::fs::write(path, content) {
+        println!("CONTENT: {:?}", content);
+
+        match std::fs::write(path.clone(), content) {
             Ok(_) => Ok(()),
             Err(io_err) => Err(SerializeError::IoError(io_err.to_string())),
         }
@@ -109,11 +114,11 @@ impl Serializer {
             result.push_str(&string);
         }
 
-        if let Some(redirect) = &request.redirect {
+        if let Some(ref save_response) = request.save_response {
             result.push_str("\n\n");
-            let string = match redirect {
-                model::Redirect::RewriteFile(path) => format!(">>! {}", path),
-                model::Redirect::NewFileIfExists(path) => format!(">> {}", path),
+            let string = match save_response {
+                model::SaveResponse::RewriteFile(path) => format!(">>! {}", path.to_string_lossy()),
+                model::SaveResponse::NewFileIfExists(path) => format!(">> {}", path.to_string_lossy()),
             };
             result.push_str(&string);
         }
@@ -123,6 +128,8 @@ impl Serializer {
 }
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::{model::*, Parser};
     use pretty_assertions::assert_eq;
@@ -140,7 +147,6 @@ mod tests {
                 no_redirect: Some(true),
                 no_log: Some(true),
                 no_cookie_jar: Some(true),
-                use_os_credentials: Some(true),
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::GET),
@@ -150,7 +156,7 @@ mod tests {
             body: RequestBody::None,
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         let expected = r"### The Request
 # @name=RequestName
@@ -174,7 +180,6 @@ GET https://httpbin.org";
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::default(),
@@ -184,7 +189,7 @@ GET https://httpbin.org";
             body: RequestBody::None,
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         let expected = r"https://httpbin.org";
 
@@ -202,7 +207,6 @@ GET https://httpbin.org";
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::GET),
@@ -212,7 +216,7 @@ GET https://httpbin.org";
             body: RequestBody::None,
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         let expected = r"GET https://httpbin.org";
 
@@ -230,7 +234,6 @@ GET https://httpbin.org";
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::GET),
@@ -240,7 +243,7 @@ GET https://httpbin.org";
             body: RequestBody::None,
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         let expected = r"GET https://httpbin.org HTTP/1.1";
 
@@ -258,7 +261,6 @@ GET https://httpbin.org";
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::CUSTOM("CustomMethod".to_string())),
@@ -268,9 +270,40 @@ GET https://httpbin.org";
             body: RequestBody::None,
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         let expected = r"CustomMethod https://httpbin.org HTTP/2.1";
+        let serialized = Serializer::serialize_requests(&[&request]);
+        assert_eq!(serialized, expected);
+    }
+
+    #[test]
+    pub fn serialize_with_form_url_encoded() {
+        let request = Request {
+            name: None,
+            headers: vec![Header::new(
+                "Content-Type",
+                "application/x-www-form-urlencoded",
+            )],
+            request_line: RequestLine {
+                method: WithDefault::Some(HttpMethod::POST),
+                target: RequestTarget::from("https://httpbin.org/post"),
+                http_version: WithDefault::default(),
+            },
+            body: RequestBody::UrlEncoded {
+                url_encoded_params: vec![
+                    UrlEncodedParam::new("abc", "def"),
+                    UrlEncodedParam::new("ghi", "jkl"),
+                ],
+            },
+
+            ..Default::default()
+        };
+        let expected = r####"POST https://httpbin.org/post
+Content-Type: application/x-www-form-urlencoded
+
+abc=def&ghi=jkl"####;
+
         let serialized = Serializer::serialize_requests(&[&request]);
         assert_eq!(serialized, expected);
     }
@@ -285,14 +318,13 @@ GET https://httpbin.org";
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
                 http_version: WithDefault::default(),
             },
-            body: RequestBody::Text {
+            body: RequestBody::Raw {
                 data: DataSource::Raw(
                     r####"{
   "name": "John Doe",
@@ -321,7 +353,7 @@ GET https://httpbin.org";
             },
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         let expected = r####"POST https://httpbin.org/post
 Content-Type: application/json
@@ -363,19 +395,18 @@ Content-Type: application/json
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
                 http_version: WithDefault::default(),
             },
-            body: RequestBody::Text {
-                data: DataSource::Raw("< /path/to/file.json".to_string()),
+            body: RequestBody::Raw {
+                data: DataSource::FromFilepath("/path/to/file.json".to_string()),
             },
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         let expected = r####"POST https://httpbin.org/post
 Content-Type: application/json
@@ -396,19 +427,18 @@ Content-Type: application/json
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
                 http_version: WithDefault::default(),
             },
-            body: RequestBody::Text {
-                data: DataSource::Raw("< /path/to/file.json".to_string()),
+            body: RequestBody::Raw {
+                data: DataSource::FromFilepath("/path/to/file.json".to_string()),
             },
             pre_request_script: None,
             response_handler: None,
-            redirect: Some(Redirect::NewFileIfExists("./path/to/out.json".to_string())),
+            save_response: Some(SaveResponse::NewFileIfExists(PathBuf::from("./path/to/out.json"))),
         };
         let expected = r####"POST https://httpbin.org/post
 Content-Type: application/json
@@ -436,7 +466,6 @@ Header::new("Cache-Control", "max-age=3600")
                 no_redirect: None,
                 no_log: None,
                 no_cookie_jar: None,
-                use_os_credentials: None,
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::POST),
@@ -446,7 +475,7 @@ Header::new("Cache-Control", "max-age=3600")
             body: RequestBody::None,
             pre_request_script: None,
             response_handler: None,
-            redirect: None,
+            save_response: None,
         };
         // we expect a newline after the headers
         let expected = r"POST https://httpbin.org/post
@@ -478,14 +507,13 @@ comments: vec![Comment {
                 no_redirect: Some(true),
                 no_log: Some(true),
                 no_cookie_jar: Some(true),
-                use_os_credentials: Some(true),
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::POST),
                 target: RequestTarget::from("https://httpbin.org/post"),
                 http_version: WithDefault::Some(HttpVersion { major: 2, minor: 1 }),
             },
-            body: RequestBody::Text { data: DataSource::Raw(r####"{
+            body: RequestBody::Raw { data: DataSource::Raw(r####"{
   "name": "John Doe",
   "age": 30,
   "email": "johndoe@example.com",
@@ -509,7 +537,7 @@ comments: vec![Comment {
 }"####.to_string() )},
             pre_request_script: Some(PreRequestScript::Script(r####" request.variables.set("firstname", "John") "####.to_string())),
             response_handler: Some(ResponseHandler::FromFilepath(r####"/path/to/responseHandler.js"####.to_string())),
-            redirect: Some(Redirect::RewriteFile("/path/to/out_file".to_string())),
+            save_response: Some(SaveResponse::RewriteFile(PathBuf::from("/path/to/out_file"))),
         };
 
         // we expect a newline after the headers
@@ -585,7 +613,6 @@ comments: vec![Comment {
                 no_redirect: Some(true),
                 no_log: Some(true),
                 no_cookie_jar: Some(true),
-                use_os_credentials: Some(true),
             },
             request_line: RequestLine {
                 method: WithDefault::Some(HttpMethod::POST),
@@ -621,7 +648,7 @@ comments: vec![Comment {
 
             pre_request_script: Some(PreRequestScript::Script("\nrequest.variables.set(\"firstname\", \"John\")\n".to_string())),
             response_handler: Some(ResponseHandler::Script("\n    client.global.set(\"my_cookie\", response.headers.valuesOf(\"Set-Cookie\")[0]);\n".to_string())),
-            redirect: Some(Redirect::NewFileIfExists("/path/to/out_file".to_string())),
+            save_response: Some(SaveResponse::NewFileIfExists(PathBuf::from("/path/to/out_file"))),
         };
 
         // we expect a newline after the headers
