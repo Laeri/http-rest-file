@@ -76,15 +76,19 @@ impl Serializer {
             result.push('\n');
         }
 
-        if let WithDefault::Some(method) = &request.request_line.method {
-            result.push_str(&method.to_string());
-            result.push(' ');
-        }
-        result.push_str(&request.request_line.target.to_string());
-
-        if let WithDefault::Some(ref http_version) = request.request_line.http_version {
-            result.push(' ');
-            result.push_str(&http_version.to_string());
+        // only output method and http version if there is some target url,
+        // otherwise when reparsing the method such as 'GET' will be parsed as the url!
+        // request line has format '[method] url [httpversion]'
+        if !request.request_line.target.is_missing() {
+            if let WithDefault::Some(method) = &request.request_line.method {
+                result.push_str(&method.to_string());
+                result.push(' ');
+            }
+            result.push_str(&request.request_line.target.to_string());
+            if let WithDefault::Some(ref http_version) = request.request_line.http_version {
+                result.push(' ');
+                result.push_str(&http_version.to_string());
+            }
         }
 
         if !request.headers.is_empty() {
@@ -118,7 +122,9 @@ impl Serializer {
             result.push_str("\n\n");
             let string = match save_response {
                 model::SaveResponse::RewriteFile(path) => format!(">>! {}", path.to_string_lossy()),
-                model::SaveResponse::NewFileIfExists(path) => format!(">> {}", path.to_string_lossy()),
+                model::SaveResponse::NewFileIfExists(path) => {
+                    format!(">> {}", path.to_string_lossy())
+                }
             };
             result.push_str(&string);
         }
@@ -163,7 +169,6 @@ mod tests {
 # @no-redirect
 # @no-log
 # @no-cookie-jar
-# @use-os-credentials
 GET https://httpbin.org";
 
         let serialized = Serializer::serialize_requests(&[&request]);
@@ -438,7 +443,9 @@ Content-Type: application/json
             },
             pre_request_script: None,
             response_handler: None,
-            save_response: Some(SaveResponse::NewFileIfExists(PathBuf::from("./path/to/out.json"))),
+            save_response: Some(SaveResponse::NewFileIfExists(PathBuf::from(
+                "./path/to/out.json",
+            ))),
         };
         let expected = r####"POST https://httpbin.org/post
 Content-Type: application/json
@@ -546,7 +553,6 @@ comments: vec![Comment {
 # @no-redirect
 # @no-log
 # @no-cookie-jar
-# @use-os-credentials
 < {% request.variables.set("firstname", "John") %}
 POST https://httpbin.org/post HTTP/2.1
 User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/93.0.4577.63 Safari/537.36
@@ -657,7 +663,6 @@ comments: vec![Comment {
 # @no-redirect
 # @no-log
 # @no-cookie-jar
-# @use-os-credentials
 < {%
 request.variables.set("firstname", "John")
 %}

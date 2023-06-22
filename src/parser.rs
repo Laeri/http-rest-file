@@ -4,7 +4,7 @@ use crate::{
     model,
     model::{
         CommentKind, DataSource, FileParseResult, Header, HttpRestFile, HttpRestFileExtension,
-        ParseError, ParseErrorKind, SaveResponse, RequestBody, RequestSettings, ResponseHandler,
+        ParseError, ParseErrorKind, RequestBody, RequestSettings, ResponseHandler, SaveResponse,
         SettingsEntry, UrlEncodedParam,
     },
     scanner::{LineIterator, WS_CHARS},
@@ -199,7 +199,7 @@ impl Parser {
                     settings: request_settings,
                     pre_request_script,
                     response_handler: None,
-                    save_response: None
+                    save_response: None,
                 };
                 return Ok((request_node, parse_errs));
             }
@@ -1119,9 +1119,13 @@ You have additional elements: '{}'",
         let path = path.unwrap().trim().to_string();
 
         if rewrite {
-            Ok(Some(SaveResponse::RewriteFile(std::path::PathBuf::from(path))))
+            Ok(Some(SaveResponse::RewriteFile(std::path::PathBuf::from(
+                path,
+            ))))
         } else {
-            Ok(Some(SaveResponse::NewFileIfExists(std::path::PathBuf::from(path))))
+            Ok(Some(SaveResponse::NewFileIfExists(
+                std::path::PathBuf::from(path),
+            )))
         }
     }
 }
@@ -1129,7 +1133,7 @@ You have additional elements: '{}'",
 #[cfg(test)]
 mod tests {
     use crate::{
-        model::{Comment, DispositionField, Request, RequestLine, HttpMethod},
+        model::{Comment, DispositionField, HttpMethod, Request, RequestLine},
         parser::model::{Header, HttpVersion},
     };
 
@@ -2076,7 +2080,6 @@ GET https://example.com
 // @no-log
 // @name= RequestName
 # @no-cookie-jar
-# @use-os-credentials
 GET https://httpbin.org
 "#####;
         let FileParseResult { requests, errs } = Parser::parse(str, false);

@@ -3,7 +3,7 @@ use rspc::Type;
 
 use serde::{Deserialize, Serialize};
 
-use std::{borrow::Cow, path::PathBuf};
+use std::borrow::Cow;
 
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -325,6 +325,7 @@ pub enum RequestTarget {
     Absolute { uri: String },
     Asterisk,
     InvalidTarget(String),
+    Missing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,7 +538,16 @@ impl ToString for RequestBody {
 }
 
 impl RequestTarget {
+
+    pub fn is_missing(&self) -> bool {
+        return matches!(self, RequestTarget::Missing);
+    }
+
     pub fn parse(value: &str) -> Result<RequestTarget, ParseError> {
+        if value == "" {
+            return Ok(RequestTarget::Missing);
+        }
+
         if value == "*" {
             return Ok(RequestTarget::Asterisk);
         }
@@ -582,6 +592,7 @@ impl RequestTarget {
                 .parse::<http::Uri>()
                 .map_or(false, |uri| uri.scheme().is_some()),
             RequestTarget::InvalidTarget(_) => false,
+            RequestTarget::Missing => false,
         }
     }
 }
@@ -693,7 +704,6 @@ pub enum SaveResponse {
     // save the response to a file and overwrite it if present
     RewriteFile(std::path::PathBuf),
 }
-
 
 #[derive(PartialEq, Debug)]
 pub struct Request {
@@ -868,6 +878,7 @@ impl ToString for RequestTarget {
             RequestTarget::Absolute { uri, .. } => uri,
             RequestTarget::RelativeOrigin { uri, .. } => uri,
             RequestTarget::InvalidTarget(target) => target,
+            RequestTarget::Missing => "",
         }
         .to_string()
     }
