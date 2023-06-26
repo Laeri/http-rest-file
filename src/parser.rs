@@ -452,6 +452,7 @@ impl Parser {
 
         let line_scanner = Scanner::new(&line);
         let tokens: Vec<String> = line_scanner.get_tokens();
+        println!("TOKENS: {:?}", tokens);
 
         let (request_line, err): (model::RequestLine, Option<ParseError>) = match &tokens[..] {
             [target_str] => (
@@ -487,15 +488,15 @@ impl Parser {
                     http_version_err,
                 )
             }
-            // we are missing at least the url
-            [] => {
-                return Err(ParseError::new_with_position(
-                    ParseErrorKind::MissingRequestTargetUrl,
-                    "The request line should have at least a target url.",
-                    line_start,
-                    Some(line_end),
-                ))
-            }
+            //
+            [] => (
+                model::RequestLine {
+                    target: RequestTarget::Missing,
+                    method: WithDefault::default(),
+                    http_version: WithDefault::default(),
+                },
+                None,
+            ),
             // on a request line only method, target and http_version should be present
             [method, target_str, http_version_str, ..] => {
                 let result = model::HttpVersion::from_str(http_version_str);
@@ -542,6 +543,8 @@ You have additional elements: '{}'",
         scanner.skip_empty_lines();
         // comments can be indented
         scanner.skip_ws();
+        println!("{:?}", scanner.debug_string());
+        println!("PARSE COMMENT");
 
         if scanner.match_str_forward(CommentKind::RequestSeparator.string_repr()) {
             return Parser::parse_comment_line(scanner, CommentKind::RequestSeparator);
@@ -553,6 +556,7 @@ You have additional elements: '{}'",
 
         // @TODO: is single comment allowed if not a name comment line?
         if scanner.match_str_forward(CommentKind::SingleTag.string_repr()) {
+            println!("PARSE COMMENT Single Tag");
             return Parser::parse_comment_line(scanner, CommentKind::SingleTag);
         }
 
@@ -1028,6 +1032,15 @@ You have additional elements: '{}'",
     ) -> Result<Option<model::ResponseHandler>, ParseError> {
         scanner.skip_empty_lines();
         scanner.skip_ws();
+        let next_two = scanner.peek_n(2);
+        if next_two.is_none() {
+            return Ok(None);
+        }
+        let next_two = next_two.unwrap();
+        if next_two[0] != '>' || next_two[1] == '>' {
+            return Ok(None);
+        }
+
         if !scanner.take(&'>') {
             return Ok(None);
         }
@@ -2376,6 +2389,62 @@ GET https://httpbin.org
         assert_eq!(
             Parser::is_multipart_boundary_valid(&boundary).is_err(),
             false
+        );
+    }
+
+    #[test]
+    pub fn parse_with_redirect_overwrite_response() {
+        let str = r###"# @name=New Request
+GET https://httpbin.org/get
+
+>>! test.txt"###;
+
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("New Request".to_string()),
+                request_line: RequestLine {
+                    method: WithDefault::Some(HttpMethod::GET),
+                    target: RequestTarget::from("https://httpbin.org/get"),
+                    http_version: WithDefault::default()
+                },
+                save_response: Some(SaveResponse::RewriteFile(std::path::PathBuf::from(
+                    "test.txt"
+                ))),
+
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    pub fn parse_with_redirect_new_file_response() {
+        let str = r###"# @name=New Request
+GET https://httpbin.org/get
+
+>> test.txt"###;
+
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("New Request".to_string()),
+                request_line: RequestLine {
+                    method: WithDefault::Some(HttpMethod::GET),
+                    target: RequestTarget::from("https://httpbin.org/get"),
+                    http_version: WithDefault::default()
+                },
+                save_response: Some(SaveResponse::NewFileIfExists(std::path::PathBuf::from(
+                    "test.txt"
+                ))),
+
+                ..Default::default()
+            }
         );
     }
 }

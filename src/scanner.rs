@@ -183,6 +183,14 @@ impl Scanner {
         self.characters.get(self.cursor)
     }
 
+    // Return the next n characters or none if not enough characters are present
+    pub fn peek_n(&self, num: usize) -> Option<Vec<char>> {
+        if self.cursor + num > self.characters.len() {
+            return None;
+        }
+        Some(self.characters[self.cursor..(self.cursor + num)].to_vec())
+    }
+
     // Checks if we scanned the whole file
     pub fn is_done(&self) -> bool {
         self.cursor >= self.characters.len()
