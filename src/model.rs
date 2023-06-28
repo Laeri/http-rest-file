@@ -389,19 +389,31 @@ impl RequestSettings {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "rspc", derive(Type))]
 pub struct DispositionField {
-    pub key: String,
-    pub value: String,
+    pub name: String,
+    pub filename: Option<String>,
+    pub filename_star: Option<String>,
 }
 
 impl DispositionField {
-    pub fn new<S, T>(key: S, value: T) -> Self
+    pub fn new<S>(name: S) -> Self
+    where
+        S: Into<String>,
+    {
+        DispositionField {
+            name: name.into(),
+            filename: None,
+            filename_star: None,
+        }
+    }
+    pub fn new_with_filename<S, T>(name: S, filename: Option<T>) -> Self
     where
         S: Into<String>,
         T: Into<String>,
     {
         DispositionField {
-            key: key.into(),
-            value: value.into(),
+            name: name.into(),
+            filename: filename.map(|t| t.into()),
+            filename_star: None,
         }
     }
 }
@@ -410,9 +422,8 @@ impl DispositionField {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "rspc", derive(Type))]
 pub struct Multipart {
-    pub name: String,
     pub data: DataSource<String>,
-    pub fields: Vec<DispositionField>,
+    pub disposition: DispositionField,
     pub headers: Vec<Header>,
 }
 
@@ -504,18 +515,16 @@ impl ToString for RequestBody {
                     multipart_res.push_str(&format!("--{}\n", boundary));
                     multipart_res.push_str(&format!(
                         "Content-Disposition: form-data; name=\"{}\"",
-                        part.name
+                        part.disposition.name
                     ));
-                    let fields_string = part
-                        .fields
-                        .iter()
-                        .map(|field| format!("{}=\"{}\"", field.key, field.value))
-                        .collect::<Vec<String>>()
-                        .join(";");
-                    if !fields_string.is_empty() {
-                        multipart_res.push_str("; ");
+
+                    if let Some(ref filename) = part.disposition.filename {
+                        multipart_res.push_str(&format!("; filename=\"{}\"", filename));
                     }
-                    multipart_res.push_str(&fields_string);
+
+                    if let Some(ref filename_star) = part.disposition.filename_star {
+                        multipart_res.push_str(&format!("; filename*=\"{}\"", filename_star));
+                    }
                     multipart_res.push('\n');
                     for header in part.headers.iter() {
                         multipart_res.push_str(&format!("{}: {}", header.key, header.value));
@@ -538,7 +547,6 @@ impl ToString for RequestBody {
 }
 
 impl RequestTarget {
-
     pub fn is_missing(&self) -> bool {
         return matches!(self, RequestTarget::Missing);
     }

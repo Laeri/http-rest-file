@@ -3,9 +3,9 @@ pub use crate::scanner::Scanner;
 use crate::{
     model,
     model::{
-        CommentKind, DataSource, FileParseResult, Header, HttpRestFile, HttpRestFileExtension,
-        ParseError, ParseErrorKind, RequestBody, RequestSettings, ResponseHandler, SaveResponse,
-        SettingsEntry, UrlEncodedParam,
+        CommentKind, DataSource, DispositionField, FileParseResult, Header, HttpRestFile,
+        HttpRestFileExtension, ParseError, ParseErrorKind, RequestBody, RequestSettings,
+        ResponseHandler, SaveResponse, SettingsEntry, UrlEncodedParam,
     },
     scanner::{LineIterator, WS_CHARS},
 };
@@ -73,40 +73,56 @@ impl Parser {
         loop {
             scanner.skip_empty_lines();
             match Parser::parse_request(&mut scanner) {
-                Ok((request, current_errs)) => {
+                Ok(Some((request, current_errs))) => {
                     requests.push(request);
                     errs.extend(current_errs);
+                }
+                Ok(None) => {
+                    // do nothing we found no request, only a request separator
                 }
                 Err(parse_errs) => {
                     errs.extend(parse_errs);
                 }
             }
+            println!("SCANNER: {:?}", scanner.debug_string());
             scanner.skip_empty_lines();
             scanner.skip_ws();
+
             if scanner.is_done() {
                 break;
             }
 
-            // There might be an ending Request separator or not
-            if !scanner.match_str_forward(REQUEST_SEPARATOR) {
-                let msg = format!(
-                    "Expected request to be terminated with '###' found {}",
-                    scanner.peek_line().map_or("".to_string(), |l| l)
-                );
-                errs.push(ParseError::new_with_position(
-                    ParseErrorKind::InvalidRequestBoundary,
-                    msg,
-                    scanner.get_pos(),
-                    None::<usize>,
-                ))
+            // // There might be an ending Request separator or not
+            // if !scanner.match_str_forward(REQUEST_SEPARATOR) {
+            //     let msg = format!(
+            //         "Expected request to be terminated with '###' found {}",
+            //         scanner.peek_line().map_or("".to_string(), |l| l)
+            //     );
+            //     errs.push(ParseError::new_with_position(
+            //         ParseErrorKind::InvalidRequestBoundary,
+            //         msg,
+            //         scanner.get_pos(),
+            //         None::<usize>,
+            //     ))
+            // }
+
+            // go to next ### that should start a request
+            while let Some(line) = scanner.peek_line() {
+                if line.trim_start().starts_with(REQUEST_SEPARATOR) {
+                    break;
+                } else {
+                    scanner.skip_to_next_line();
+                }
             }
+
             scanner.skip_empty_lines();
             scanner.skip_ws();
+
             if scanner.is_done() {
                 break;
             }
         }
-        if dbg!(!errs.is_empty() && print_errors) {
+        if !errs.is_empty() && print_errors {
             eprintln!("{}", Parser::get_pretty_print_errs(&scanner, errs.iter()));
         }
         FileParseResult { requests, errs }
@@ -116,7 +132,7 @@ impl Parser {
     /// is encountered
     pub fn parse_request(
         scanner: &mut Scanner,
-    ) -> Result<(model::Request, Vec<ParseError>), Vec<ParseError>> {
+    ) -> Result<Option<(model::Request, Vec<ParseError>)>, Vec<ParseError>> {
         let mut comments = Vec::new();
         let mut name: Option<String> = None;
         let mut parse_errs: Vec<ParseError> = Vec::new();
@@ -135,7 +151,9 @@ impl Parser {
             }
             match Parser::parse_meta_comment_line(scanner) {
                 Some(Ok(SettingsEntry::NameEntry(entry_name))) => {
-                    name = Some(entry_name);
+                    if !entry_name.is_empty() {
+                        name = Some(entry_name);
+                    }
                     continue;
                 }
                 Some(Ok(entry)) => {
@@ -162,6 +180,11 @@ impl Parser {
             }
         }
 
+        // we only found comments and no request, in this case no request is present
+        if scanner.is_done() {
+            return Ok(None);
+        }
+
         // if no name has been found with meta tag @name=, set name from a comment starting with
         // '###' if there is any
         if name.is_none() {
@@ -169,8 +192,10 @@ impl Parser {
                 .iter()
                 .position(|c| c.kind == CommentKind::RequestSeparator)
             {
-                let comment = comments.remove(position);
-                name = Some(comment.value.trim().to_string());
+                let comment = comments.remove(position).value.trim().to_string();
+                if !comment.is_empty() {
+                    name = Some(comment);
+                };
             }
         }
 
@@ -201,7 +226,7 @@ impl Parser {
                     response_handler: None,
                     save_response: None,
                 };
-                return Ok((request_node, parse_errs));
+                return Ok(Some((request_node, parse_errs)));
             }
         }
 
@@ -249,7 +274,7 @@ impl Parser {
             let first_comment = request_node.comments.remove(0);
             request_node.name = Some(first_comment.value);
         }
-        Ok((request_node, parse_errs))
+        Ok(Some((request_node, parse_errs)))
     }
 
     /// Get string for printing errors to the console
@@ -323,7 +348,11 @@ impl Parser {
         {
             if let Ok(Some(name)) = Parser::parse_meta_name(&mut line_scanner) {
                 scanner.skip_to_next_line();
-                return Some(Ok(SettingsEntry::NameEntry(name)));
+                if !name.is_empty() {
+                    return Some(Ok(SettingsEntry::NameEntry(name)));
+                } else {
+                    return None;
+                }
             }
             let line = line_scanner.peek_line();
             #[allow(clippy::question_mark)]
@@ -452,7 +481,6 @@ impl Parser {
 
         let line_scanner = Scanner::new(&line);
         let tokens: Vec<String> = line_scanner.get_tokens();
-        println!("TOKENS: {:?}", tokens);
 
         let (request_line, err): (model::RequestLine, Option<ParseError>) = match &tokens[..] {
             [target_str] => (
@@ -543,8 +571,6 @@ You have additional elements: '{}'",
         scanner.skip_empty_lines();
         // comments can be indented
         scanner.skip_ws();
-        println!("{:?}", scanner.debug_string());
-        println!("PARSE COMMENT");
 
         if scanner.match_str_forward(CommentKind::RequestSeparator.string_repr()) {
             return Parser::parse_comment_line(scanner, CommentKind::RequestSeparator);
@@ -556,7 +582,6 @@ You have additional elements: '{}'",
 
         // @TODO: is single comment allowed if not a name comment line?
         if scanner.match_str_forward(CommentKind::SingleTag.string_repr()) {
-            println!("PARSE COMMENT Single Tag");
             return Parser::parse_comment_line(scanner, CommentKind::SingleTag);
         }
 
@@ -634,7 +659,6 @@ You have additional elements: '{}'",
                     .unwrap_or(RequestBody::None)
             }
             Some("application/x-www-form-urlencoded") => {
-                println!("HERE");
                 Parser::parse_body_urlencoded(scanner, &mut parse_errs)
             }
             _ => Parser::parse_raw_body(scanner, &mut parse_errs),
@@ -649,25 +673,29 @@ You have additional elements: '{}'",
         parse_errs: &mut Vec<ParseError>,
     ) -> Option<RequestBody> {
         let boundary_regex =
-            regex::Regex::from_str("multipart/form-data\\s*;\\s*boundary\\s*=\\s*(.+)").unwrap();
+            regex::Regex::from_str("multipart/form-data\\s*(;\\s*boundary\\s*=\\s*(.+))?").unwrap();
         let captures = boundary_regex.captures(content_type);
 
         if let Some(captures) = captures {
-            let boundary_match = captures.get(1);
+            let boundary_match = captures.get(2);
 
             // either with or without quotes
             if boundary_match.is_none() {
                 let msg = format!("Found header field with key 'Content-Type' and value 'multipart/form-data' but missing the boundary for the multipart content. Value: {}", content_type);
                 parse_errs.push(ParseError::new(ParseErrorKind::InvalidHeaderFields, msg));
             }
-            let mut boundary = boundary_match.unwrap().as_str();
+            let default_boundary = &"--boundary--";
+            let mut boundary = boundary_match
+                .map(|o| o.as_str())
+                .unwrap_or(default_boundary)
+                .to_string();
             if boundary.starts_with('"') && boundary.ends_with('"') {
-                boundary = &boundary[1..(boundary.len() - 1)];
+                boundary = boundary[1..(boundary.len() - 1)].to_string();
             }
-            if let Err(boundary_err) = Parser::is_multipart_boundary_valid(boundary) {
+            if let Err(boundary_err) = Parser::is_multipart_boundary_valid(&boundary) {
                 parse_errs.push(boundary_err);
             }
-            match Parser::parse_multipart_body(scanner, boundary) {
+            match Parser::parse_multipart_body(scanner, &boundary, parse_errs) {
                 Ok(multipart_body) => return Some(multipart_body),
                 Err(err) => parse_errs.push(err),
             };
@@ -684,7 +712,6 @@ You have additional elements: '{}'",
     ) -> RequestBody {
         let mut url_encoded_params: Vec<UrlEncodedParam> = Vec::new();
         if let Ok(Some(matches)) = scanner.match_regex_forward("(.*)[\r\n]+(###|$)") {
-            println!("GOT matches: {:?}", matches);
             let body_content = matches.get(0).unwrap().trim();
             url_encoded_params = body_content
                 .split("&")
@@ -771,6 +798,7 @@ You have additional elements: '{}'",
     fn parse_multipart_body(
         scanner: &mut Scanner,
         boundary: &str,
+        parse_errs: &mut Vec<ParseError>,
     ) -> Result<RequestBody, ParseError> {
         scanner.skip_empty_lines();
 
@@ -778,7 +806,7 @@ You have additional elements: '{}'",
 
         let mut errors: Vec<ParseError> = Vec::new();
         loop {
-            let multipart = Parser::parse_multipart_part(scanner, boundary);
+            let multipart = Parser::parse_multipart_part(scanner, boundary, parse_errs);
             if let Err(err) = multipart {
                 errors.push(err);
                 break;
@@ -788,6 +816,7 @@ You have additional elements: '{}'",
             if scanner.is_done() {
                 break;
             }
+
             // end of multipart
             let end_boundary = regex::escape(&format!("--{}--", boundary));
             if scanner.match_str_forward(&end_boundary) {
@@ -814,6 +843,7 @@ You have additional elements: '{}'",
     fn parse_multipart_part(
         scanner: &mut Scanner,
         boundary: &str,
+        parse_errs: &mut Vec<ParseError>,
     ) -> Result<model::Multipart, ParseError> {
         let boundary_line = format!("--{}", boundary);
         let multipart_end_line = format!("--{}--", boundary);
@@ -843,7 +873,7 @@ You have additional elements: '{}'",
         })?;
         let end_pos = scanner.get_pos();
 
-        let (mut fields, part_headers) = match &part_headers[..] {
+        let (field, part_headers) = match &part_headers[..] {
             [] => {
                 return Err(ParseError::new_with_position(
                     ParseErrorKind::InvalidMultipart,
@@ -880,40 +910,42 @@ You have additional elements: '{}'",
                         Some(end_pos),
                     ));
                 }
-                let mut fields: Vec<model::DispositionField> = Vec::new();
-                for disposition_field in parts_iter {
-                    match disposition_field.split('=').map(|p| p.trim()).collect::<Vec<&str>>()[..] {
+                let mut disposition_field = DispositionField::new_with_filename("", None::<String>);
+                for current in parts_iter {
+                    match current.split('=').map(|p| p.trim()).collect::<Vec<&str>>()[..] {
                         [key, mut value] => {
                             if value.starts_with('"') && value.ends_with('"') {
                                 value = &value[1..(value.len()-1)];
                             }
-                            let field = model::DispositionField {key: key.to_string(), value: value.to_string()};
-                            fields.push(field);
+                            if key == "filename" {
+                                disposition_field.filename = Some(value.to_string());
+                            } else if key == "filename*" {
+                                disposition_field.filename_star = Some(value.to_string());
+                            } else if key == "name" {
+                                disposition_field.name = value.to_string();
+                            }
                         },
                             _ => {
-                            return Err(ParseError::new(ParseErrorKind::InvalidMultipart, format!("Expected content disposition values in form <key>=<value> or <key>=\"<value>\" but found: '{}'", disposition_field)))
+                            return Err(ParseError::new(ParseErrorKind::InvalidMultipart, format!("Expected content disposition values in form <key>=<value> or <key>=\"<value>\" but found: '{}'", current)))
                         }
 
                     }
                 }
-                (fields, part_headers)
+                (disposition_field, part_headers)
             }
         };
 
-        let name_index = fields.iter().position(|field| field.key == "name");
-        if name_index.is_none() {
-            return Err(ParseError::new_with_position(
+        if field.name.is_empty() {
+            parse_errs.push(ParseError::new_with_position(
                 ParseErrorKind::InvalidMultipart,
                 format!(
                     "Content-Disposition requires field 'name', found only: {:?}",
-                    fields
+                    part_headers
                 ),
                 start_pos,
                 Some(end_pos),
             ));
         }
-
-        let name = fields.remove(name_index.unwrap());
 
         if !scanner.match_str_forward("\n") {
             return Err(ParseError::new(
@@ -944,8 +976,7 @@ You have additional elements: '{}'",
             let file_path = &line[1..].trim();
             // @TODO is name expected?
             Ok(Multipart {
-                name: name.value,
-                fields,
+                disposition: field,
                 headers: part_headers.to_vec(),
                 data: DataSource::FromFilepath(file_path.to_string()), // @TODO: when to read in data from file?
             })
@@ -965,8 +996,7 @@ You have additional elements: '{}'",
                 let peek_line = peek_line.unwrap();
                 if peek_line == boundary_line || peek_line == multipart_end_line {
                     return Ok(Multipart {
-                        name: name.value,
-                        fields,
+                        disposition: field,
                         headers: part_headers.to_owned(),
                         data: DataSource::Raw(text),
                     });
@@ -1707,9 +1737,8 @@ Content-Disposition: form-data; name="part1_name"
             model::RequestBody::Multipart {
                 boundary: "--test_boundary".to_string(),
                 parts: vec![Multipart {
-                    name: "part1_name".to_string(),
+                    disposition: DispositionField::new_with_filename("part1_name", None::<String>),
                     data: DataSource::FromFilepath("path/to/file".to_string()),
-                    fields: vec![],
                     headers: vec![]
                 }]
             }
@@ -1756,14 +1785,12 @@ more content
                 boundary: "--test.?)()test".to_string(),
                 parts: vec![
                     Multipart {
-                        name: "text".to_string(),
-                        fields: vec![],
+                        disposition: DispositionField::new("text"),
                         headers: vec![],
                         data: DataSource::Raw("some text\n".to_string()),
                     },
                     Multipart {
-                        name: "text".to_string(),
-                        fields: vec![],
+                        disposition: DispositionField::new("text"),
                         headers: vec![],
                         data: DataSource::Raw("more content\n\n".to_string()),
                     }
@@ -1813,20 +1840,15 @@ Content-Type: application/json
                 parts: vec![
                     Multipart {
                         data: DataSource::Raw("Name".to_string()),
-                        name: "element-name".to_string(),
-                        fields: vec![],
+                        disposition: DispositionField::new("element-name"),
                         headers: vec![Header {
                             key: "Content-Type".to_string(),
                             value: "text/plain".to_string()
                         }]
                     },
                     Multipart {
-                        name: "data".to_string(),
                         data: DataSource::FromFilepath("./request-form-data.json".to_string()),
-                        fields: vec![DispositionField {
-                            key: "filename".to_string(),
-                            value: "data.json".to_string()
-                        }],
+                        disposition: DispositionField::new_with_filename("data", Some("data.json")),
                         headers: vec![Header {
                             key: "Content-Type".to_string(),
                             value: "application/json".to_string()
@@ -1877,11 +1899,7 @@ H4sIAGiNIU8AA+3R0W6CMBQGYK59iobLZantRDG73osUOGqnFNJWM2N897UghG1ZdmWWLf93U/jP4bRA
             model::RequestBody::Multipart {
                 boundary: r#"/////////////////////////////"#.to_string(),
                 parts: vec![model::Multipart {
-                    name: "file".to_string(),
-                    fields: vec![DispositionField {
-                        key: "filename".to_string(),
-                        value: "binaryfile.tar.gz".to_string()
-                    }],
+                    disposition: DispositionField::new_with_filename("file", Some("binaryfile.tar.gz")),
                     headers: vec![
                         Header {
                             key: "Content-Type".to_string(),
@@ -2009,15 +2027,15 @@ Content-Type: application/json
 < ./input.json
 ###
 
-GET https://example.com
+GET https://example.com/first
 ###
-GET https://example.com
+GET https://example.com/second
 
 
 ###
         "#####;
 
-        let FileParseResult { requests, errs } = Parser::parse(str, false);
+        let FileParseResult { requests, errs } = dbg!(Parser::parse(str, false));
         assert_eq!(errs, vec![]);
         assert_eq!(requests.len(), 3);
 
@@ -2056,7 +2074,7 @@ GET https://example.com
                         http_version: WithDefault::default(),
                         method: WithDefault::Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
-                            uri: "https://example.com".to_string()
+                            uri: "https://example.com/first".to_string()
                         }
                     },
                     settings: RequestSettings::default(),
@@ -2073,7 +2091,7 @@ GET https://example.com
                         http_version: WithDefault::default(),
                         method: WithDefault::Some(HttpMethod::GET),
                         target: model::RequestTarget::Absolute {
-                            uri: "https://example.com".to_string()
+                            uri: "https://example.com/second".to_string()
                         }
                     },
                     settings: RequestSettings::default(),
@@ -2443,6 +2461,86 @@ GET https://httpbin.org/get
                     "test.txt"
                 ))),
 
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    /// If no boundary is given use default boundary '--boundary--'
+    pub fn parse_multipart_no_boundary() {
+        let str = r####"# @name=New Request
+GET https://httpbin.org/{{abc}}
+Content-Type: multipart/form-data
+
+--boundary--
+
+>>! test.txt"####;
+
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
+        // should have one error warning that no boundary was given
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].kind, ParseErrorKind::InvalidHeaderFields);
+        //assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("New Request".to_string()),
+                request_line: RequestLine {
+                    method: WithDefault::Some(HttpMethod::GET),
+                    target: RequestTarget::from("https://httpbin.org/{{abc}}"),
+                    http_version: WithDefault::default()
+                },
+                headers: vec![Header::new("Content-Type", "multipart/form-data")],
+                body: RequestBody::Multipart {
+                    boundary: "--boundary--".to_string(),
+                    parts: vec![]
+                },
+                save_response: Some(SaveResponse::RewriteFile(std::path::PathBuf::from(
+                    "test.txt"
+                ))),
+
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    pub fn parse_multipart_single_boundary_no_filename() {
+        let str = r###"# @name=New Request
+GET https://httpbin.org/{{abc}}
+Content-Type: multipart/form-data; boundary="--boundary--"
+
+----boundary--
+Content-Disposition: form-data; name=""
+
+
+----boundary----"###;
+
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
+        // one error allowed, name should not be empty of content-disposition inside a multipart
+        assert_eq!(errs.len(), 1);
+        //assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("New Request".to_string()),
+                request_line: RequestLine {
+                    method: WithDefault::Some(HttpMethod::GET),
+                    target: RequestTarget::from("https://httpbin.org/{{abc}}"),
+                    http_version: WithDefault::default()
+                },
+                headers: vec![Header::new("Content-Type", "multipart/form-data; boundary=\"--boundary--\"")],
+                body: RequestBody::Multipart {
+                    boundary: "--boundary--".to_string(),
+                    parts: vec![Multipart {
+                        disposition: DispositionField::new(""),
+                        headers: vec![],
+                        data: DataSource::Raw("".to_string())
+                    }]
+                },
                 ..Default::default()
             }
         );

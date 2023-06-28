@@ -629,21 +629,16 @@ comments: vec![Comment {
                 boundary: "WebAppBoundary".to_string(),
                 parts: vec![
                     Multipart {
-                        name: "element-name".to_string(),
                         data: DataSource::Raw("Name".to_string()),
-                        fields: vec![],
+                        disposition: DispositionField::new("element-name"),
                         headers: vec![Header {
                             key: "Content-Type".to_string(),
                             value: "text/plain".to_string()
                         }]
                     },
                     Multipart {
-                        name: "data".to_string(), 
+                        disposition: DispositionField::new_with_filename("data", Some("data.json")),
                         data: DataSource::FromFilepath("./request-form-data.json".to_string()),
-                        fields: vec![DispositionField {
-                            key: "filename".to_string(),
-                            value: "data.json".to_string()
-                        }],
                         headers: vec![Header {
                             key: "Content-Type".to_string(),
                             value: "application/json".to_string()

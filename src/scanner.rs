@@ -339,11 +339,11 @@ impl Scanner {
         if !regex_str.starts_with('^') {
             regex_str = format!("^{}", user_regex_str);
         }
-        let regex = regex::bytes::Regex::new(&dbg!(regex_str))?;
+        let regex = regex::bytes::Regex::new(&regex_str)?;
 
-        let string_tmp = dbg!(self.characters[self.cursor..].iter().collect::<String>());
+        let string_tmp = self.characters[self.cursor..].iter().collect::<String>();
         let bytes = string_tmp.as_bytes();
-        return match dbg!(regex.captures(bytes)) {
+        return match regex.captures(bytes) {
             Some(comment_captures) => {
                 let mut str_captures: Vec<String> = Vec::new();
 
@@ -446,7 +446,6 @@ impl Scanner {
         }
         let mut line_end = self.cursor - 1;
         loop {
-            println!("END {}", line_end);
             // no previous line found
             if line_end == 0 {
                 return None;
@@ -461,7 +460,6 @@ impl Scanner {
 
         let mut line_start = line_end - 1;
         loop {
-            println!("START {}", line_start);
             if line_start == 0 {
                 break;
             }
@@ -476,7 +474,7 @@ impl Scanner {
             line_start = line_end;
         }
 
-        Some(dbg!((line_start, line_end)))
+        Some((line_start, line_end))
     }
 
     /// Return the previous line without moving the cursor position
@@ -505,7 +503,6 @@ impl Scanner {
 #[cfg(debug_assertions)]
 impl Scanner {
     pub fn debug_string(&self) -> String {
-        println!("LEN: {}, cursor: {}", self.characters.len(), self.cursor);
         let before: String = self.characters[..self.cursor].iter().collect();
 
         let current: String = self
