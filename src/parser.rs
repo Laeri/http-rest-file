@@ -38,7 +38,8 @@ impl Parser {
         if let Ok(content) = fs::read_to_string(path) {
             let result = Parser::parse(&content, true);
             if result.requests.is_empty() {
-                return Err(ParseError::new(ParseErrorKind::NoRequestFoundInFile, ""));
+                let msg = format!("No request was found in file: '{:?}'", &path);
+                return Err(ParseError::new(ParseErrorKind::NoRequestFoundInFile, msg));
             }
             Ok(HttpRestFile {
                 requests: result.requests,
@@ -84,7 +85,6 @@ impl Parser {
                     errs.extend(parse_errs);
                 }
             }
-            println!("SCANNER: {:?}", scanner.debug_string());
             scanner.skip_empty_lines();
             scanner.skip_ws();
 
@@ -711,9 +711,15 @@ You have additional elements: '{}'",
         _parse_errs: &mut Vec<ParseError>,
     ) -> RequestBody {
         let mut url_encoded_params: Vec<UrlEncodedParam> = Vec::new();
-        if let Ok(Some(matches)) = scanner.match_regex_forward("(.*)[\r\n]+(###|$)") {
-            let body_content = matches.get(0).unwrap().trim();
-            url_encoded_params = body_content
+        let form_encoded: String = String::new();
+        let line = scanner.peek_line();
+        if let Some(line) = scanner.peek_line() {
+            let line = line.trim();
+            if line.starts_with(REQUEST_SEPARATOR) {
+                return RequestBody::UrlEncoded { url_encoded_params };
+            }
+            scanner.skip_to_next_line();
+            url_encoded_params = line
                 .split("&")
                 .into_iter()
                 .map(|key_val| {
@@ -723,7 +729,8 @@ You have additional elements: '{}'",
                     UrlEncodedParam::new(key.unwrap_or_default(), value.unwrap_or_default())
                 })
                 .collect::<Vec<UrlEncodedParam>>();
-        };
+        }
+
         RequestBody::UrlEncoded { url_encoded_params }
     }
 
@@ -1985,6 +1992,37 @@ Content-Type: application/json
     }
 
     #[test]
+    pub fn parse_url_form_encoded_end_of_file() {
+        let str = r####"# @name=Create Checkout Session
+POST {{base_url}}/create_checkout_session?a=aa
+Content-Type: application/x-www-form-urlencoded
+
+abc=def&ghi=jkl"####;
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
+
+        assert_eq!(
+            request.headers,
+            vec![Header::new(
+                "Content-Type",
+                "application/x-www-form-urlencoded"
+            )]
+        );
+
+        assert_eq!(
+            request.body,
+            RequestBody::UrlEncoded {
+                url_encoded_params: vec![
+                    UrlEncodedParam::new("abc", "def"),
+                    UrlEncodedParam::new("ghi", "jkl"),
+                ]
+            }
+        )
+    }
+
+    #[test]
     pub fn parse_url_form_encoded() {
         let str = r####"
 POST https://test.com/formEncoded
@@ -2532,7 +2570,10 @@ Content-Disposition: form-data; name=""
                     target: RequestTarget::from("https://httpbin.org/{{abc}}"),
                     http_version: WithDefault::default()
                 },
-                headers: vec![Header::new("Content-Type", "multipart/form-data; boundary=\"--boundary--\"")],
+                headers: vec![Header::new(
+                    "Content-Type",
+                    "multipart/form-data; boundary=\"--boundary--\""
+                )],
                 body: RequestBody::Multipart {
                     boundary: "--boundary--".to_string(),
                     parts: vec![Multipart {

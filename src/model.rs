@@ -645,6 +645,10 @@ impl HttpRestFileExtension {
             HttpRestFileExtension::Rest => ".rest".to_string(),
         }
     }
+
+    pub fn get_default_extension() -> String {
+        HttpRestFileExtension::Http.get_extension()
+    }
 }
 
 impl std::fmt::Display for HttpRestFileExtension {
