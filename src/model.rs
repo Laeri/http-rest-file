@@ -5,97 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use std::borrow::Cow;
 
-#[derive(PartialEq, Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub enum ParseErrorKind {
-    // General error
-    General,
-    // The target url on the request line is invalid
-    InvalidTargetUrl,
-    // Http version of the request line is not valid, valid are HTTP/<num>.<num>
-    InvalidHttpVersion,
-    // Request line requires at least an url
-    MissingRequestTargetUrl,
-    // Request line should have form <url> | <method> <url> | <method> <url> <version>
-    TooManyElementsOnRequestLine,
-    // Some multipart is invalid
-    InvalidMultipart,
-    // A header of a request is invalid
-    InvalidHeaderFields,
-    // We expect requests to be separated by '###'
-    InvalidRequestBoundary,
-    // only certain characters tart a comment such as '//', '#', '###'
-    CommentTypeNotRecognized,
-    // pre request scripts < {% %}
-    InvalidPreRequestScript,
-    // response handler '> <path>' or '> {% <your_script> %}' is not valid
-    InvalidResponseHandler,
-    // redirect to file requires a path
-    RedirectMissingPath,
-    // if read file errors
-    FileReadError,
-    // file does not contain any request
-    NoRequestFoundInFile,
-    // path to read file from is not valid
-    InvalidFilePath,
-    // Response redirect should have form '>> <some/path>' or '>>! <some/path>'
-    InvalidSaveResponseRedirect,
-}
-
-#[derive(PartialEq, Debug, Clone)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-pub struct ParseError {
-    pub kind: ParseErrorKind,
-    pub message: String,
-    pub start_pos: Option<usize>,
-    pub end_pos: Option<usize>,
-}
-
-impl Default for ParseError {
-    fn default() -> Self {
-        ParseError {
-            kind: ParseErrorKind::General,
-            message: String::new(),
-            start_pos: None,
-            end_pos: None,
-        }
-    }
-}
-impl ParseError {
-    pub fn new<S: Into<String>>(kind: ParseErrorKind, msg: S) -> Self {
-        ParseError {
-            kind,
-            message: msg.into(),
-            start_pos: None,
-            end_pos: None,
-        }
-    }
-
-    pub fn new_with_position<S, T, U>(
-        kind: ParseErrorKind,
-        msg: S,
-        start_pos: T,
-        end_pos: Option<U>,
-    ) -> ParseError
-    where
-        S: Into<String>,
-        T: Into<usize>,
-        U: Into<usize>,
-    {
-        ParseError {
-            kind,
-            message: msg.into(),
-            start_pos: Some(start_pos.into()),
-            end_pos: end_pos.map(|p| p.into()),
-        }
-    }
-}
+use crate::error::{ParseError, ParseErrorDetails};
 
 #[allow(dead_code)]
 pub enum WithDefault<T> {
     Some(T),
     Default(T),
-    DefaultFn(Box<dyn Fn() -> T>),
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for WithDefault<T> {
@@ -103,34 +18,15 @@ impl<T: std::fmt::Debug> std::fmt::Debug for WithDefault<T> {
         match self {
             WithDefault::Some(value) => f.debug_tuple("Some").field(value).finish(),
             WithDefault::Default(value) => f.debug_tuple("Default").field(value).finish(),
-            WithDefault::DefaultFn(fun) => {
-                let result = fun();
-                let type_name = std::any::type_name::<T>();
-                f.debug_tuple("DefaultFn")
-                    .field(&format_args!("{}: {:?}", type_name, result))
-                    .finish()
-            }
         }
     }
 }
 
 impl<T> WithDefault<T> {
-    #[allow(dead_code)]
-    pub fn new_default_fn(f: Box<dyn Fn() -> T>) -> Self {
-        WithDefault::DefaultFn(f)
-    }
-
-    pub fn with_default(value: Option<T>, default: T) -> Self {
+    pub fn new_with_default(value: Option<T>, default: T) -> Self {
         match value {
             Some(value) => WithDefault::Some(value),
             None => WithDefault::Default(default),
-        }
-    }
-
-    pub fn with_default_fn(value: Option<T>, default_fn: Box<dyn Fn() -> T>) -> Self {
-        match value {
-            Some(value) => WithDefault::Some(value),
-            None => WithDefault::DefaultFn(default_fn),
         }
     }
 }
@@ -177,18 +73,16 @@ impl<T: ToOwned<Owned = T>> WithDefault<T> {
         match self {
             WithDefault::Some(val) => val.to_owned(),
             WithDefault::Default(val) => val.to_owned(),
-            WithDefault::DefaultFn(func) => func(),
         }
     }
 }
 
 impl<T: Clone> WithDefault<T> {
     #[allow(dead_code)]
-    pub fn get_ref_or_default<'a>(&'a self) -> Cow<'a, T> {
+    pub fn get_ref_or_default(&self) -> Cow<T> {
         match self {
             WithDefault::Some(val) => Cow::Borrowed(val),
             WithDefault::Default(val) => Cow::Borrowed(val),
-            WithDefault::DefaultFn(func) => Cow::Owned(func()),
         }
     }
 }
@@ -204,7 +98,6 @@ impl<T> WithDefault<T> {
         match self {
             WithDefault::Some(value) => value,
             WithDefault::Default(default) => default,
-            WithDefault::DefaultFn(f) => f(),
         }
     }
 }
@@ -214,32 +107,20 @@ impl<T: Clone> WithDefault<T> {
         match self {
             WithDefault::Some(value) => value.clone(),
             WithDefault::Default(default) => default.clone(),
-            WithDefault::DefaultFn(f) => f(),
         }
     }
 }
 
 impl<T: std::cmp::PartialOrd> PartialOrd for WithDefault<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        let first_computed;
-        let second_computed;
-
         let first_ref = match self {
             WithDefault::Default(default) => default,
             WithDefault::Some(value) => value,
-            WithDefault::DefaultFn(default_fn) => {
-                first_computed = Some(default_fn());
-                first_computed.as_ref().unwrap()
-            }
         };
 
         let second_ref = match other {
             WithDefault::Default(default) => default,
             WithDefault::Some(value) => value,
-            WithDefault::DefaultFn(default_fn) => {
-                second_computed = Some(default_fn());
-                second_computed.as_ref().unwrap()
-            }
         };
 
         first_ref.partial_cmp(second_ref)
@@ -253,17 +134,17 @@ impl<T: std::cmp::PartialEq> PartialEq for WithDefault<T> {
             (WithDefault::Default(value), WithDefault::Default(other_value)) => {
                 value.eq(other_value)
             }
-            (WithDefault::DefaultFn(f), WithDefault::DefaultFn(f_other)) => (f()).eq(&f_other()),
             _ => false,
         }
     }
 }
 
 #[allow(clippy::upper_case_acronyms)]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "rspc", derive(Type))]
 pub enum HttpMethod {
+    #[default]
     GET,
     POST,
     PUT,
@@ -308,12 +189,6 @@ impl HttpMethod {
             "TRACE" => HttpMethod::TRACE,
             custom => HttpMethod::CUSTOM(custom.to_string()),
         }
-    }
-}
-
-impl Default for HttpMethod {
-    fn default() -> Self {
-        HttpMethod::GET
     }
 }
 
@@ -548,11 +423,11 @@ impl ToString for RequestBody {
 
 impl RequestTarget {
     pub fn is_missing(&self) -> bool {
-        return matches!(self, RequestTarget::Missing);
+        matches!(self, RequestTarget::Missing)
     }
 
     pub fn parse(value: &str) -> Result<RequestTarget, ParseError> {
-        if value == "" {
+        if value.is_empty() {
             return Ok(RequestTarget::Missing);
         }
 
@@ -582,10 +457,7 @@ impl RequestTarget {
                     Ok(_uri) => Ok(RequestTarget::Absolute {
                         uri: value.to_string(),
                     }),
-                    _ => Err(ParseError::new(
-                        ParseErrorKind::InvalidTargetUrl,
-                        value.to_string(),
-                    )),
+                    _ => Err(ParseError::InvalidRequestUrl(value.to_string())),
                 }
             }
         }
@@ -673,7 +545,7 @@ impl HttpRestFileExtension {
 #[derive(PartialEq, Debug)]
 pub struct HttpRestFile {
     pub requests: Vec<Request>,
-    pub errs: Vec<ParseError>,
+    pub errs: Vec<ParseErrorDetails>,
     pub path: Box<std::path::PathBuf>,
     pub extension: Option<HttpRestFileExtension>,
 }
@@ -775,13 +647,7 @@ impl std::str::FromStr for CommentKind {
             "//" => Ok(Self::DoubleSlash),
             "###" => Ok(Self::RequestSeparator),
             "#" => Ok(Self::SingleTag),
-            _ => {
-                let msg = format!("Invalid start characters for comment: {}", s);
-                Err(ParseError::new(
-                    ParseErrorKind::CommentTypeNotRecognized,
-                    msg,
-                ))
-            }
+            _ => Err(ParseError::InvalidCommentStart(s.to_string())),
         }
     }
 }
@@ -821,17 +687,13 @@ impl Default for HttpVersion {
 impl std::str::FromStr for HttpVersion {
     type Err = ParseError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        println!("STRING: {}", s);
-        let err =  ParseError::new(ParseErrorKind::InvalidHttpVersion,String::from("Http version requires format: 'HTTP/\\d+.\\d+' or 'HTTP/\\d+'. 
-For example 'HTTP/2.1'. You can also omit the version and only specify the url target of the request or the http method and the url target.
-                "));
         if !s.starts_with("HTTP/") {
-            return Err(err);
+            return Err(ParseError::InvalidHttpVersion(s.to_string()));
         }
         // @TODO: string can also have form HTTP/2 200, at least returned from the client, maybe
         // check if we can remove it there already...
-        let s = if s.contains(" ") {
-            s.split(" ").next().unwrap_or("")
+        let s = if s.contains(' ') {
+            s.split(' ').next().unwrap_or("")
         } else {
             s
         };
@@ -840,11 +702,9 @@ For example 'HTTP/2.1'. You can also omit the version and only specify the url t
         let major = dbg!(split.next()).map(|v| v.parse::<u32>());
         // if no minor version is present, then we assume it is 2.0 --> @TODO: is this ok?
         let minor = split.next().map(|v| v.parse::<u32>()).unwrap_or(Ok(0));
-        println!("MAJOR: {:?}", major);
-        println!("MINOR: {:?}", minor);
         match (major, minor) {
             (Some(Ok(major)), Ok(minor)) => Ok(HttpVersion { major, minor }),
-            _ => Err(err),
+            _ => Err(ParseError::InvalidHttpVersion(s.to_string())),
         }
     }
 }
@@ -919,7 +779,7 @@ impl Request {
 #[derive(PartialEq, Debug)]
 pub struct FileParseResult {
     pub requests: Vec<Request>,
-    pub errs: Vec<ParseError>,
+    pub errs: Vec<ParseErrorDetails>,
 }
 
 #[cfg(test)]
@@ -939,11 +799,6 @@ mod tests {
         );
 
         assert_eq!(
-            WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 2, minor: 1 })),
-            WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 2, minor: 1 }))
-        );
-
-        assert_eq!(
             WithDefault::Some(HttpMethod::CUSTOM("CustomVerb".to_string())),
             WithDefault::Some(HttpMethod::CUSTOM("CustomVerb".to_string()))
         );
@@ -953,16 +808,7 @@ mod tests {
             WithDefault::Some(HttpVersion { major: 1, minor: 1 }).is_default(),
             false
         );
-        assert!(WithDefault::new_default_fn(Box::new(|| 1)).is_default());
-        assert!(
-            WithDefault::DefaultFn(Box::new(|| HttpVersion { major: 1, minor: 1 })).is_default()
-        );
-
         assert_eq!(WithDefault::Some(1).unwrap_or_default(), 1);
         assert_eq!(WithDefault::Default(1).unwrap_or_default(), 1);
-        assert_eq!(
-            WithDefault::DefaultFn(Box::new(|| 1)).unwrap_or_default(),
-            1
-        );
     }
 }

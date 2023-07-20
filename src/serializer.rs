@@ -1,10 +1,7 @@
-use crate::model::{self, CommentKind, HttpRestFile, ResponseHandler, WithDefault};
-
-#[derive(PartialEq, Debug, Clone)]
-pub enum SerializeError {
-    InvalidFilePath,
-    IoError(String),
-}
+use crate::{
+    error::SerializeError,
+    model::{self, CommentKind, HttpRestFile, ResponseHandler, WithDefault},
+};
 
 pub struct Serializer {}
 
@@ -19,9 +16,7 @@ impl Serializer {
             &file_model.requests.iter().collect::<Vec<&model::Request>>()[..],
         );
 
-        println!("CONTENT: {:?}", content);
-
-        match std::fs::write(path.clone(), content) {
+        match std::fs::write(path, content) {
             Ok(_) => Ok(()),
             Err(io_err) => Err(SerializeError::IoError(io_err.to_string())),
         }

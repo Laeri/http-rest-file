@@ -20,7 +20,7 @@ impl From<regex::Error> for ScanError {
 
 #[derive(Eq, Debug, Clone)]
 pub struct ScannerPos {
-    cursor: usize,
+    pub cursor: usize,
 }
 
 impl From<ScannerPos> for usize {
@@ -138,6 +138,10 @@ impl Scanner {
         ScannerPos {
             cursor: self.cursor,
         }
+    }
+
+    pub fn get_cursor(&self) -> usize {
+        self.cursor
     }
 
     pub fn get_error_context(&self, start_pos: usize, end_pos: Option<usize>) -> ErrorContext {

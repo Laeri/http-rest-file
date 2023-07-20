@@ -12,3 +12,4 @@ pub mod serializer;
 pub use parser::Parser;
 pub use parser::Scanner;
 pub use serializer::Serializer;
+pub mod error;
