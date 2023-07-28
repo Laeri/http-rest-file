@@ -1,12 +1,12 @@
 use self::model::{Multipart, RequestTarget, WithDefault};
 pub use crate::scanner::Scanner;
 use crate::{
-    error::{ParseError, ParseErrorDetails},
+    error::{ErrorWithPartial, ParseError, ParseErrorDetails},
     model,
     model::{
         CommentKind, DataSource, DispositionField, FileParseResult, Header, HttpRestFile,
-        HttpRestFileExtension, RequestBody, RequestSettings, ResponseHandler, SaveResponse,
-        SettingsEntry, UrlEncodedParam,
+        HttpRestFileExtension, PartialRequest, RequestBody, RequestSettings, ResponseHandler,
+        SaveResponse, SettingsEntry, UrlEncodedParam,
     },
     scanner::{LineIterator, WS_CHARS},
 };
@@ -39,9 +39,6 @@ impl Parser {
     pub fn parse_file(path: &std::path::Path) -> Result<model::HttpRestFile, ParseError> {
         if let Ok(content) = fs::read_to_string(path) {
             let result = Parser::parse(&content, true);
-            if result.requests.is_empty() {
-                return Err(ParseError::NoRequestFoundInFile(path.to_owned()));
-            }
             Ok(HttpRestFile {
                 requests: result.requests,
                 errs: result.errs,
@@ -63,20 +60,20 @@ impl Parser {
         let mut scanner = Scanner::new(string);
 
         let mut requests: Vec<model::Request> = Vec::new();
-        let mut errs: Vec<ParseErrorDetails> = Vec::new();
+        let mut errs: Vec<ErrorWithPartial> = Vec::new();
 
         loop {
-            scanner.skip_empty_lines();
+            scanner.skip_empty_lines_and_ws();
+
+            if scanner.is_done() {
+                break;
+            }
             match Parser::parse_request(&mut scanner) {
-                Ok(Some((request, current_errs))) => {
+                Ok(request) => {
                     requests.push(request);
-                    errs.extend(current_errs);
                 }
-                Ok(None) => {
-                    // do nothing we found no request, only a request separator
-                }
-                Err(parse_errs) => {
-                    errs.extend(parse_errs);
+                Err(err_with_partial) => {
+                    errs.push(err_with_partial);
                 }
             }
             scanner.skip_empty_lines();
@@ -85,20 +82,6 @@ impl Parser {
             if scanner.is_done() {
                 break;
             }
-
-            // // There might be an ending Request separator or not
-            // if !scanner.match_str_forward(REQUEST_SEPARATOR) {
-            //     let msg = format!(
-            //         "Expected request to be terminated with '###' found {}",
-            //         scanner.peek_line().map_or("".to_string(), |l| l)
-            //     );
-            //     errs.push(ParseError::new_with_position(
-            //         ParseErrorKind::InvalidRequestBoundary,
-            //         msg,
-            //         scanner.get_pos(),
-            //         None::<usize>,
-            //     ))
-            // }
 
             // go to next ### that should start a request
             while let Some(line) = scanner.peek_line() {
@@ -116,6 +99,7 @@ impl Parser {
                 break;
             }
         }
+
         if !errs.is_empty() && print_errors {
             eprintln!("{}", Parser::get_pretty_print_errs(&scanner, errs.iter()));
         }
@@ -124,13 +108,11 @@ impl Parser {
 
     /// Parse a single request either until no further lines are present or a `REQUEST_SEPARATOR`
     /// is encountered
-    pub fn parse_request(
-        scanner: &mut Scanner,
-    ) -> Result<Option<(model::Request, Vec<ParseErrorDetails>)>, Vec<ParseErrorDetails>> {
+    pub fn parse_request(scanner: &mut Scanner) -> Result<model::Request, ErrorWithPartial> {
         let mut comments = Vec::new();
         let mut name: Option<String> = None;
         let mut parse_errs: Vec<ParseErrorDetails> = Vec::new();
-        let mut request_settings = RequestSettings::default();
+        let mut settings = RequestSettings::default();
         let mut pre_request_script: Option<model::PreRequestScript> = None;
 
         scanner.skip_empty_lines();
@@ -151,7 +133,7 @@ impl Parser {
                     continue;
                 }
                 Some(Ok(entry)) => {
-                    request_settings.set_entry(&entry);
+                    settings.set_entry(&entry);
                     continue;
                 }
                 Some(Err(parse_error)) => {
@@ -176,7 +158,26 @@ impl Parser {
 
         // we only found comments and no request, in this case no request is present
         if scanner.is_done() {
-            return Ok(None);
+            parse_errs.push(ParseErrorDetails {
+                error: ParseError::MissingRequestTargetLine,
+                details: None,
+                start_pos: Some(scanner.get_pos().cursor),
+                end_pos: None,
+            });
+            return Err(ErrorWithPartial {
+                partial_request: PartialRequest {
+                    name,
+                    comments,
+                    settings,
+                    request_line: None,
+                    body: None,
+                    pre_request_script,
+                    save_response: None,
+                    headers: None,
+                    response_handler: None,
+                },
+                details: parse_errs,
+            });
         }
 
         // if no name has been found with meta tag @name=, set name from a comment starting with
@@ -200,7 +201,21 @@ impl Parser {
             }
             Err(parse_error) => {
                 parse_errs.push(parse_error);
-                return Err(parse_errs);
+
+                return Err(ErrorWithPartial {
+                    partial_request: PartialRequest {
+                        name,
+                        comments,
+                        settings,
+                        response_handler: None,
+                        pre_request_script: None,
+                        request_line: None,
+                        headers: None,
+                        save_response: None,
+                        body: None,
+                    },
+                    details: parse_errs,
+                });
             }
         };
 
@@ -211,16 +226,16 @@ impl Parser {
                 let request_node = model::Request {
                     name,
                     comments,
+                    settings,
+                    pre_request_script,
                     request_line,
                     // no headers nor body parsed
                     headers: vec![],
                     body: RequestBody::None,
-                    settings: request_settings,
-                    pre_request_script,
                     response_handler: None,
                     save_response: None,
                 };
-                return Ok(Some((request_node, parse_errs)));
+                return Ok(request_node);
             }
         }
 
@@ -228,26 +243,95 @@ impl Parser {
             Ok(headers) => headers,
             Err(parse_err) => {
                 parse_errs.push(parse_err);
-                Vec::<model::Header>::new()
+                return Err(ErrorWithPartial {
+                    partial_request: PartialRequest {
+                        name,
+                        comments,
+                        settings,
+                        pre_request_script,
+                        request_line: Some(request_line),
+                        headers: None,
+                        body: None,
+                        response_handler: None,
+                        save_response: None,
+                    },
+                    details: parse_errs,
+                });
             }
         };
 
         scanner.skip_empty_lines();
 
-        let (body, mut body_parse_errs) = Parser::parse_body(scanner, &headers);
-        parse_errs.append(&mut body_parse_errs);
+        let (body, body_errs) = match Parser::parse_body(scanner, &headers) {
+            Ok(body) => (body, Vec::<ParseErrorDetails>::new()),
+            Err((body, errs)) => (body, errs),
+        };
 
-        let mut response_handler: Option<ResponseHandler> = None;
-        if let Ok(Some(result)) = Parser::parse_response_handler(scanner) {
-            response_handler = Some(result);
+        if !body_errs.is_empty() {
+            parse_errs.extend(body_errs.clone());
+        }
+
+        let response_handler = match Parser::parse_response_handler(scanner) {
+            Ok(result) => result,
+            Err(err) => {
+                parse_errs.push(err);
+                return Err(ErrorWithPartial {
+                    partial_request: PartialRequest {
+                        name,
+                        comments,
+                        settings,
+                        pre_request_script,
+                        request_line: Some(request_line),
+                        headers: Some(headers),
+                        body: Some(body),
+                        response_handler: None,
+                        save_response: None,
+                    },
+                    details: parse_errs,
+                });
+            }
+        };
+
+        scanner.skip_empty_lines();
+
+        let save_response = match Parser::parse_redirect(scanner) {
+            Ok(result) => result,
+            Err(err) => {
+                parse_errs.push(err);
+                return Err(ErrorWithPartial {
+                    partial_request: PartialRequest {
+                        name,
+                        comments,
+                        settings,
+                        pre_request_script,
+                        request_line: Some(request_line),
+                        headers: Some(headers),
+                        body: Some(body),
+                        response_handler,
+                        save_response: None,
+                    },
+                    details: parse_errs,
+                });
+            }
         };
         scanner.skip_empty_lines();
 
-        let mut save_response: Option<SaveResponse> = None;
-        if let Ok(Some(result)) = Parser::parse_redirect(scanner) {
-            save_response = Some(result);
+        if !body_errs.is_empty() {
+            return Err(ErrorWithPartial {
+                partial_request: PartialRequest {
+                    name,
+                    comments,
+                    settings,
+                    pre_request_script,
+                    request_line: Some(request_line),
+                    headers: Some(headers),
+                    body: Some(body),
+                    response_handler,
+                    save_response,
+                },
+                details: parse_errs,
+            });
         }
-        scanner.skip_empty_lines();
 
         let mut request_node = model::Request {
             name,
@@ -255,28 +339,36 @@ impl Parser {
             request_line,
             headers,
             body,
-            settings: request_settings,
+            settings,
             pre_request_script,
             response_handler,
             save_response,
         };
 
         // if no name set we use the first comment as name
-        // @TODO: only remove comment if it is a '###' comment
-        #[allow(clippy::comparison_to_empty)]
+        // Only do this for comments not containing meta sign @ as these specify the request
+        // settings
         if request_node.name.is_none() && !request_node.comments.is_empty() {
-            let first_comment = request_node.comments.remove(0);
-            request_node.name = Some(first_comment.value);
+            let name_pos = request_node
+                .comments
+                .iter()
+                .position(|com| !com.value.contains('@'));
+            if let Some(name_pos) = name_pos {
+                let name_comment = request_node.comments.remove(name_pos);
+                request_node.name = Some(name_comment.value);
+            }
         }
-        Ok(Some((request_node, parse_errs)))
+        Ok(request_node)
     }
 
     /// Get string for printing errors to the console
     fn get_pretty_print_errs<'a, T>(scanner: &Scanner, errs: T) -> String
     where
-        T: Iterator<Item = &'a ParseErrorDetails>,
+        T: Iterator<Item = &'a ErrorWithPartial>,
     {
-        errs.map(|err| Parser::pretty_err_string(scanner, err))
+        errs.map(|err| &err.details)
+            .flatten()
+            .map(|err| Parser::pretty_err_string(scanner, err))
             .collect::<Vec<String>>()
             .join(&format!("\n{}\n", "-".repeat(50)))
     }
@@ -400,7 +492,6 @@ impl Parser {
                     details: Some("When a '<' character is encountered before the request target line you can either specify a path to a file whose content will be inserted".to_string()),
                     start_pos: Some(start_pos.cursor),
                     end_pos: Some(scanner.get_cursor()),
-                    partial_request: None
                 };
 
                 return Err(details);
@@ -644,7 +735,7 @@ impl Parser {
     fn parse_body(
         scanner: &mut Scanner,
         headers: &[Header],
-    ) -> (RequestBody, Vec<ParseErrorDetails>) {
+    ) -> Result<RequestBody, (RequestBody, Vec<ParseErrorDetails>)> {
         let mut parse_errs: Vec<ParseErrorDetails> = Vec::new();
         let content_type = headers
             .iter()
@@ -666,7 +757,11 @@ impl Parser {
             _ => Parser::parse_raw_body(scanner),
         };
 
-        (body, parse_errs)
+        if parse_errs.is_empty() {
+            Ok(body)
+        } else {
+            Err((body, parse_errs))
+        }
     }
 
     fn parse_content_type_multipart_form_data(
@@ -2064,7 +2159,7 @@ GET https://example.com/second
         "#####;
 
         let FileParseResult { requests, errs } = dbg!(Parser::parse(str, false));
-        assert_eq!(errs, vec![]);
+        assert_eq!(errs.len(), 1);
         assert_eq!(requests.len(), 3);
 
         // @TODO check content
@@ -2509,13 +2604,13 @@ Content-Type: multipart/form-data
         // should have one error warning that no boundary was given
         assert_eq!(errs.len(), 1);
         assert!(matches!(
-            errs[0].error,
+            errs[0].details[0].error,
             ParseError::MissingMultipartHeaderBoundaryDefinition(_)
         ));
         //assert_eq!(errs, vec![]);
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 0);
         assert_eq!(
-            requests[0],
+            Into::<Request>::into(errs[0].partial_request.clone()),
             Request {
                 name: Some("New Request".to_string()),
                 request_line: RequestLine {
@@ -2553,9 +2648,9 @@ Content-Disposition: form-data; name=""
         // one error allowed, name should not be empty of content-disposition inside a multipart
         assert_eq!(errs.len(), 1);
         //assert_eq!(errs, vec![]);
-        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.len(), 0);
         assert_eq!(
-            requests[0],
+            Into::<Request>::into(errs[0].partial_request.clone()),
             Request {
                 name: Some("New Request".to_string()),
                 request_line: RequestLine {

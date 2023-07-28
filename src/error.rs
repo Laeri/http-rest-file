@@ -1,15 +1,18 @@
+#[cfg(feature = "rspc")]
+use rspc::Type;
+
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::model::Request;
+use crate::model::PartialRequest;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "rspc", derive(Type))]
 #[derive(Error, Debug, PartialEq, Eq, Clone)]
 pub enum ParseError {
-    #[error("No request has been found in the given file: '{0}'.")]
-    NoRequestFoundInFile(PathBuf),
+
     #[error("Could not read the file: '{0}'.")]
     CouldNotReadRequestFile(PathBuf),
 
@@ -82,18 +85,20 @@ pub enum ParseError {
     #[error("Missing filepath for response after redirecting file using '>>', or '>>!'")]
     MissingRedirectResponsePath,
 
+    #[error("Could not import collection")]
+    ImportCollectionError,
+
     //let msg = "Expected pre request starting characters '{%' after a matching '<', or a filepath to a handler script above the request.".to_string();
     #[error("unknown parse error")]
     Unknown,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct ParseErrorDetails {
     pub error: ParseError,
     pub details: Option<String>,
     pub start_pos: Option<usize>,
     pub end_pos: Option<usize>,
-    pub partial_request: Option<Request>,
 }
 
 impl Default for ParseErrorDetails {
@@ -103,7 +108,6 @@ impl Default for ParseErrorDetails {
             details: None,
             start_pos: None,
             end_pos: None,
-            partial_request: None,
         }
     }
 }
@@ -115,7 +119,6 @@ impl ParseErrorDetails {
             details: None,
             start_pos: Some(position.0),
             end_pos: position.1,
-            partial_request: None,
         }
     }
 }
@@ -134,4 +137,10 @@ impl From<ParseError> for ParseErrorDetails {
 pub enum SerializeError {
     #[error("IoError occurred during serialization: {0}")]
     IoError(String),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ErrorWithPartial {
+    pub partial_request: PartialRequest,
+    pub details: Vec<ParseErrorDetails>,
 }

@@ -5,12 +5,22 @@ use serde::{Deserialize, Serialize};
 
 use std::borrow::Cow;
 
-use crate::error::{ParseError, ParseErrorDetails};
+use crate::error::{ErrorWithPartial, ParseError};
 
 #[allow(dead_code)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum WithDefault<T> {
     Some(T),
     Default(T),
+}
+
+impl<T: Clone> Clone for WithDefault<T> {
+    fn clone(&self) -> Self {
+        match self {
+            WithDefault::Some(value) => WithDefault::Some(value.clone()),
+            WithDefault::Default(default_val) => WithDefault::Default(default_val.clone()),
+        }
+    }
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for WithDefault<T> {
@@ -192,7 +202,7 @@ impl HttpMethod {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "rspc", derive(Type))]
 pub enum RequestTarget {
@@ -545,7 +555,7 @@ impl HttpRestFileExtension {
 #[derive(PartialEq, Debug)]
 pub struct HttpRestFile {
     pub requests: Vec<Request>,
-    pub errs: Vec<ParseErrorDetails>,
+    pub errs: Vec<ErrorWithPartial>,
     pub path: Box<std::path::PathBuf>,
     pub extension: Option<HttpRestFileExtension>,
 }
@@ -590,6 +600,7 @@ pub enum SaveResponse {
 }
 
 #[derive(PartialEq, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Request {
     pub name: Option<String>,
     pub comments: Vec<Comment>,
@@ -652,7 +663,7 @@ impl std::str::FromStr for CommentKind {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "rspc", derive(Type))]
 pub struct Comment {
@@ -698,8 +709,8 @@ impl std::str::FromStr for HttpVersion {
             s
         };
         let rest = &s[5..].to_string();
-        let mut split = dbg!(rest).split('.');
-        let major = dbg!(split.next()).map(|v| v.parse::<u32>());
+        let mut split = rest.split('.');
+        let major = split.next().map(|v| v.parse::<u32>());
         // if no minor version is present, then we assume it is 2.0 --> @TODO: is this ok?
         let minor = split.next().map(|v| v.parse::<u32>()).unwrap_or(Ok(0));
         match (major, minor) {
@@ -715,7 +726,8 @@ impl std::fmt::Display for HttpVersion {
     }
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RequestLine {
     pub method: WithDefault<HttpMethod>,
     pub target: RequestTarget,
@@ -779,7 +791,41 @@ impl Request {
 #[derive(PartialEq, Debug)]
 pub struct FileParseResult {
     pub requests: Vec<Request>,
-    pub errs: Vec<ParseErrorDetails>,
+    pub errs: Vec<ErrorWithPartial>,
+}
+
+#[derive(PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct PartialRequest {
+    pub name: Option<String>,
+    pub comments: Vec<Comment>,
+    pub settings: RequestSettings,
+    pub request_line: Option<RequestLine>,
+    pub headers: Option<Vec<Header>>,
+    pub body: Option<RequestBody>,
+    pub pre_request_script: Option<PreRequestScript>,
+    pub response_handler: Option<ResponseHandler>,
+    pub save_response: Option<SaveResponse>,
+}
+
+impl From<PartialRequest> for Request {
+    fn from(partial: PartialRequest) -> Self {
+        Request {
+            name: partial.name,
+            comments: partial.comments,
+            request_line: partial.request_line.unwrap_or(RequestLine {
+                method: WithDefault::<HttpMethod>::default(),
+                target: RequestTarget::Missing,
+                http_version: WithDefault::Default(HttpVersion::default()),
+            }),
+            body: partial.body.unwrap_or(RequestBody::None),
+            save_response: partial.save_response,
+            headers: partial.headers.unwrap_or_default(),
+            response_handler: partial.response_handler,
+            settings: partial.settings,
+            pre_request_script: partial.pre_request_script,
+        }
+    }
 }
 
 #[cfg(test)]

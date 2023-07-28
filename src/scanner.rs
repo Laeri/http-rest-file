@@ -273,6 +273,17 @@ impl Scanner {
         }
     }
 
+    pub fn skip_empty_lines_and_ws(&mut self) {
+        loop {
+            let pos = self.get_pos();
+            self.skip_empty_lines();
+            self.skip_ws();
+            if self.get_pos().cursor == pos.cursor {
+                break;
+            }
+        }
+    }
+
     /// Tries to match the given string and if successful moves the cursor to the next
     /// position after the strings and returns if matched or not
     /// If cursor is at the end of the file, nothing can be matched and always false will be
