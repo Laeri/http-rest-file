@@ -9,7 +9,6 @@ homepage = "https://github.com/Laeri/http-rest-file"
 license = "MIT"
 keywords = ["http", "parser", "jetbrains"]
 categories = ["parser-implementations", "parsing"]
-build = "build.rs"
 publish = true
 description = "Parse jetbrains .http/.rest http client formatted files into a model or serialize an existing model to a file"
 
