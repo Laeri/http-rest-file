@@ -7,10 +7,41 @@ for testing purposes.
 JetBrains has an inbuilt http client within their editor that can perform these specified requests.
 See here for more information: [Intellij Http Syntax](https://www.jetbrains.com/help/idea/exploring-http-syntax.html)
 
+## What is the .http/.rest format
+With the http file format you can specify requests given 
+- an HTTP method such as (GET, POST, PUT, ..)
+- an URL
+- optionally the HTTP version
+- headers
+- body
+
+Such a request could look like this:
+
+```
+GET https://httpbin.org/get
+```
+
+or using a POST and some additional meta information in the comments:
+
+```
+### Some comment describing the request 
+# @name=Request Name
+# @no-log @no-follow
+POST https://httpbin.org/post
+Content-Type: application/json
+
+< path/to/json/file.json
+
+>>! save_response_output.json
+```
+
+
 JetBrains also specified the request in editor in the following github project.
 [http-request-in-editor-spec](https://github.com/JetBrains/http-request-in-editor-spec)
 The content of the specification seems to be somewhat outdated but still describes the format quite well.
 
+
+## Add Library Using Cargo
 `cargo add http-rest-file`
 
 ## Usage
