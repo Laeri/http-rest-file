@@ -5,8 +5,8 @@ use crate::{
     model,
     model::{
         CommentKind, DataSource, DispositionField, FileParseResult, Header, HttpRestFile,
-        HttpRestFileExtension, PartialRequest, RequestBody, RequestSettings, ResponseHandler,
-        SaveResponse, SettingsEntry, UrlEncodedParam,
+        HttpRestFileExtension, PartialRequest, RequestBody, RequestLine, RequestSettings,
+        ResponseHandler, SaveResponse, SettingsEntry, UrlEncodedParam,
     },
     scanner::{LineIterator, WS_CHARS},
 };
@@ -194,28 +194,14 @@ impl Parser {
             }
         }
 
-        let request_line = match Parser::parse_request_line(scanner) {
+        let request_line: Option<RequestLine> = match Parser::parse_request_line(scanner) {
             Ok((request_line, errs)) => {
                 parse_errs.extend(errs);
-                request_line
+                Some(request_line)
             }
             Err(parse_error) => {
                 parse_errs.push(parse_error);
-
-                return Err(ErrorWithPartial {
-                    partial_request: PartialRequest {
-                        name,
-                        comments,
-                        settings,
-                        response_handler: None,
-                        pre_request_script: None,
-                        request_line: None,
-                        headers: None,
-                        save_response: None,
-                        body: None,
-                    },
-                    details: parse_errs,
-                });
+                None
             }
         };
 
@@ -223,19 +209,36 @@ impl Parser {
         {
             let peek_line = scanner.peek_line();
             if peek_line.is_some() && peek_line.unwrap().trim().starts_with(REQUEST_SEPARATOR) {
-                let request_node = model::Request {
-                    name,
-                    comments,
-                    settings,
-                    pre_request_script,
-                    request_line,
-                    // no headers nor body parsed
-                    headers: vec![],
-                    body: RequestBody::None,
-                    response_handler: None,
-                    save_response: None,
-                };
-                return Ok(request_node);
+                if let Some(request_line) = request_line {
+                    let request_node = model::Request {
+                        name,
+                        comments,
+                        settings,
+                        pre_request_script,
+                        request_line,
+                        // no headers nor body parsed
+                        headers: vec![],
+                        body: RequestBody::None,
+                        response_handler: None,
+                        save_response: None,
+                    };
+                    return Ok(request_node);
+                } else {
+                    return Err(ErrorWithPartial {
+                        partial_request: PartialRequest {
+                            name,
+                            comments,
+                            settings,
+                            response_handler: None,
+                            pre_request_script: None,
+                            request_line: None,
+                            headers: None,
+                            save_response: None,
+                            body: None,
+                        },
+                        details: parse_errs,
+                    });
+                }
             }
         }
 
@@ -249,7 +252,7 @@ impl Parser {
                         comments,
                         settings,
                         pre_request_script,
-                        request_line: Some(request_line),
+                        request_line,
                         headers: None,
                         body: None,
                         response_handler: None,
@@ -281,7 +284,7 @@ impl Parser {
                         comments,
                         settings,
                         pre_request_script,
-                        request_line: Some(request_line),
+                        request_line,
                         headers: Some(headers),
                         body: Some(body),
                         response_handler: None,
@@ -304,7 +307,7 @@ impl Parser {
                         comments,
                         settings,
                         pre_request_script,
-                        request_line: Some(request_line),
+                        request_line,
                         headers: Some(headers),
                         body: Some(body),
                         response_handler,
@@ -316,14 +319,14 @@ impl Parser {
         };
         scanner.skip_empty_lines();
 
-        if !body_errs.is_empty() {
+        if !parse_errs.is_empty() {
             return Err(ErrorWithPartial {
                 partial_request: PartialRequest {
                     name,
                     comments,
                     settings,
                     pre_request_script,
-                    request_line: Some(request_line),
+                    request_line,
                     headers: Some(headers),
                     body: Some(body),
                     response_handler,
@@ -336,7 +339,8 @@ impl Parser {
         let mut request_node = model::Request {
             name,
             comments,
-            request_line,
+            // we can unwrap as there were errors and we would have returned above
+            request_line: request_line.unwrap(),
             headers,
             body,
             settings,
@@ -574,6 +578,16 @@ impl Parser {
         let line_scanner = Scanner::new(&line);
         let tokens: Vec<String> = line_scanner.get_tokens();
 
+        // It can be that the request line is missing but there are still headers
+        if tokens.len() >= 2 && tokens[0].contains(':') {
+            return Err(ParseErrorDetails {
+                error: ParseError::MissingRequestTargetLine,
+                details: None,
+                start_pos: Some(line_start.cursor),
+                end_pos: None,
+            });
+        }
+
         let (request_line, err): (model::RequestLine, Option<ParseErrorDetails>) = match &tokens[..]
         {
             [target_str] => (
@@ -616,15 +630,14 @@ impl Parser {
                 )
             }
             //
-            [] => (
-                model::RequestLine {
-                    target: RequestTarget::Missing,
-                    method: WithDefault::default(),
-                    http_version: WithDefault::default(),
-                },
-                None,
-            ),
-            // on a request line only method, target and http_version should be present
+            [] => {
+                return Err(ParseErrorDetails {
+                    error: ParseError::MissingRequestTargetLine,
+                    details: None,
+                    start_pos: Some(line_start.cursor),
+                    end_pos: None,
+                });
+            } // on a request line only method, target and http_version should be present
             [method, target_str, http_version_str, ..] => {
                 let result = model::HttpVersion::from_str(http_version_str);
                 let http_version = match result {
@@ -1246,7 +1259,7 @@ impl Parser {
 
         if path.is_none() {
             return Err(ParseErrorDetails::new_with_position(
-                ParseError::MissingRedirectResponsePath,
+                ParseError::MissingResponseOutputPath,
                 (start_pos.cursor, Some(scanner.get_cursor())),
             ));
         }
@@ -2159,6 +2172,7 @@ GET https://example.com/second
         "#####;
 
         let FileParseResult { requests, errs } = dbg!(Parser::parse(str, false));
+        println!("errs: {:?}", errs);
         assert_eq!(errs.len(), 1);
         assert_eq!(requests.len(), 3);
 

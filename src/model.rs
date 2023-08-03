@@ -560,7 +560,7 @@ pub struct HttpRestFile {
     pub extension: Option<HttpRestFileExtension>,
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Eq)]
 #[cfg_attr(feature = "rspc", derive(Type))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PreRequestScript {
@@ -579,7 +579,7 @@ impl ToString for PreRequestScript {
     }
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "rspc", derive(Type))]
 pub enum ResponseHandler {

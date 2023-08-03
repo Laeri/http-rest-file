@@ -83,7 +83,7 @@ pub enum ParseError {
     MissingResponseHandlerClose,
 
     #[error("Missing filepath for response after redirecting file using '>>', or '>>!'")]
-    MissingRedirectResponsePath,
+    MissingResponseOutputPath,
 
     #[error("Could not import collection")]
     ImportCollectionError,
