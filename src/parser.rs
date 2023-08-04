@@ -767,7 +767,17 @@ impl Parser {
                 .unwrap_or(RequestBody::None)
             }
             Some("application/x-www-form-urlencoded") => Parser::parse_body_urlencoded(scanner),
-            _ => Parser::parse_raw_body(scanner),
+            _ => {
+                let body = Parser::parse_raw_body(scanner);
+                // if we have a content-type then we just have an empty body instead of none
+                if content_type.is_some() && matches!(body, RequestBody::None) {
+                    RequestBody::Raw {
+                        data: DataSource::Raw(String::new()),
+                    }
+                } else {
+                    body
+                }
+            }
         };
 
         if parse_errs.is_empty() {
@@ -2687,5 +2697,43 @@ Content-Disposition: form-data; name=""
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    pub fn parse_with_content_type_and_empty_body() {
+        let str = r####"
+POST https://test.com/formEncoded
+Content-Type: application/json
+"####;
+
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
+
+        assert_eq!(
+            request.headers,
+            vec![Header::new("Content-Type", "application/json")]
+        );
+
+        assert_eq!(
+            request.body,
+            RequestBody::Raw {
+                data: DataSource::Raw(String::new())
+            }
+        );
+
+        let str = r####"
+POST https://test.com/formEncoded
+"####;
+
+        let FileParseResult { mut requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        let request = requests.remove(0);
+
+        assert_eq!(request.headers, vec![]);
+
+        assert_eq!(request.body, RequestBody::None);
     }
 }
