@@ -11,7 +11,8 @@ use crate::{
     scanner::{LineIterator, WS_CHARS},
 };
 pub use http::Uri;
-use std::{fs, str::FromStr};
+use regex::Regex;
+use std::{fs, str::FromStr, collections::HashMap};
 
 pub const REQUEST_SEPARATOR: &str = "###";
 pub const META_COMMENT_SLASH: &str = "//";
@@ -195,8 +196,52 @@ impl Parser {
         }
 
         let request_line: Option<RequestLine> = match Parser::parse_request_line(scanner) {
-            Ok((request_line, errs)) => {
+            Ok((mut request_line, errs)) => {
                 parse_errs.extend(errs);
+                if pre_request_script.as_ref().is_some_and(|prs| prs.to_string().contains("request.variables.set")) {
+                    lazy_static::lazy_static! {
+                        static ref VAR_SET: Regex = Regex::new(r#"request\.variables\.set."(?<key>\w+)", "(?<value>\w+)""#).unwrap();
+                        static ref HANDLE_BARS: Regex = Regex::new(r"\{\{(\w+)\}\}").unwrap();
+                    }
+
+                    let mut kv: HashMap<String, String> = HashMap::new();
+
+                    for captures in VAR_SET.captures_iter(&pre_request_script.clone().unwrap().to_string()) {
+                        let capture = |index| {
+                            captures.get(index).map(|c| c.as_str().to_string())
+                        };
+
+                        println!("{captures:?}");
+
+                        if let (Some(k), Some(v)) = (capture(1), capture(2)) {
+                            kv.entry(k).or_insert(v);
+                        }
+                    }
+
+                    match request_line.target.clone() {
+                        RequestTarget::Absolute { uri } => {
+                            let mut new_uri = uri.clone();
+
+                            for captures in HANDLE_BARS.captures_iter(&uri) {
+                                let capture = |index| {
+                                    captures.get(index).map(|c| c.as_str().to_string())
+                                };
+
+                                if let Some(var_name) = capture(1) {
+                                    if let Some(var) = kv.get(&var_name) {
+                                        new_uri = new_uri.
+                                            replace(&capture(1).unwrap(), var).
+                                            replace("{", "").
+                                            replace("}", "");
+                                    }
+                                }
+                            }
+
+                            request_line.target = RequestTarget::Absolute { uri: new_uri };
+                        },
+                        _ => {}
+                    }
+                }
                 Some(request_line)
             }
             Err(parse_error) => {
@@ -2385,6 +2430,89 @@ GET https://httpbin.org
                 )),
                 response_handler: None,
                 save_response: None,
+            }
+        );
+    }
+
+    #[test]
+    pub fn parse_pre_request_script_variable_rename() {
+        let str = r#####"
+### Request
+< {% request.variables.set("firstname", "John") %}
+// @no-log
+GET https://httpbin.org/{{firstname}}
+"#####;
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("Request".to_string()),
+                headers: vec![],
+                comments: vec![],
+                settings: RequestSettings {
+                    no_redirect: Some(false),
+                    no_log: Some(true),
+                    no_cookie_jar: Some(false),
+                },
+                request_line: RequestLine {
+                    method: WithDefault::Some(HttpMethod::GET),
+                    target: RequestTarget::from("https://httpbin.org/John"),
+                    http_version: WithDefault::default()
+                },
+                body: model::RequestBody::None,
+                pre_request_script: Some(model::PreRequestScript::Script(
+                    r#" request.variables.set("firstname", "John") "#.to_string()
+                )),
+                response_handler: None,
+                save_response: None
+            }
+        );
+    }
+
+    #[test]
+    pub fn parse_pre_request_script_variable_rename_multiline() {
+        let str = r#####"
+### Request
+< {%
+    request.variables.set("firstname", "John")
+    request.variables.set("domain", "httpbin")
+%}
+// @no-log
+GET https://{{domain}}.org/{{firstname}}
+"#####;
+
+        let pre_request_script = r####"
+    request.variables.set("firstname", "John")
+    request.variables.set("domain", "httpbin")
+"####;
+
+        let FileParseResult { requests, errs } = Parser::parse(str, false);
+        assert_eq!(errs, vec![]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0],
+            Request {
+                name: Some("Request".to_string()),
+                headers: vec![],
+                comments: vec![],
+                settings: RequestSettings {
+                    no_redirect: Some(false),
+                    no_log: Some(true),
+                    no_cookie_jar: Some(false),
+                },
+                request_line: RequestLine {
+                    method: WithDefault::Some(HttpMethod::GET),
+                    target: RequestTarget::from("https://httpbin.org/John"),
+                    http_version: WithDefault::default()
+                },
+                body: model::RequestBody::None,
+                pre_request_script: Some(model::PreRequestScript::Script(
+                    pre_request_script.to_string()
+                )),
+                response_handler: None,
+                save_response: None
             }
         );
     }
