@@ -1,5 +1,5 @@
-#[cfg(feature = "rspc")]
-use rspc::Type;
+#[cfg(feature = "specta")]
+use specta::Type;
 
 use serde::{Deserialize, Serialize};
 
@@ -152,7 +152,7 @@ impl<T: std::cmp::PartialEq> PartialEq for WithDefault<T> {
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum HttpMethod {
     #[default]
     GET,
@@ -204,7 +204,7 @@ impl HttpMethod {
 
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum RequestTarget {
     RelativeOrigin { uri: String },
     Absolute { uri: String },
@@ -215,7 +215,7 @@ pub enum RequestTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum SettingsEntry {
     NoRedirect,
     NoLog,
@@ -225,7 +225,7 @@ pub enum SettingsEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub struct RequestSettings {
     pub no_redirect: Option<bool>,
     pub no_log: Option<bool>,
@@ -272,7 +272,7 @@ impl RequestSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub struct DispositionField {
     pub name: String,
     pub filename: Option<String>,
@@ -305,7 +305,7 @@ impl DispositionField {
 
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub struct Multipart {
     pub data: DataSource<String>,
     pub disposition: DispositionField,
@@ -314,7 +314,7 @@ pub struct Multipart {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum DataSource<T> {
     Raw(T),
     FromFilepath(String),
@@ -331,7 +331,7 @@ impl ToString for DataSource<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub struct UrlEncodedParam {
     pub key: String,
     pub value: String,
@@ -352,7 +352,7 @@ impl UrlEncodedParam {
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum RequestBody {
     None,
 
@@ -489,7 +489,7 @@ impl RequestTarget {
 
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub struct Header {
     pub key: String,
     pub value: String,
@@ -514,7 +514,7 @@ impl ToString for Header {
 
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum HttpRestFileExtension {
     Http,
     Rest,
@@ -561,7 +561,7 @@ pub struct HttpRestFile {
 }
 
 #[derive(PartialEq, Debug, Clone, Eq)]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PreRequestScript {
     FromFilepath(String),
@@ -581,7 +581,7 @@ impl ToString for PreRequestScript {
 
 #[derive(PartialEq, Debug, Clone, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum ResponseHandler {
     FromFilepath(String),
     Script(String),
@@ -589,7 +589,7 @@ pub enum ResponseHandler {
 
 #[derive(PartialEq, Debug, Clone, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 ///https://www.jetbrains.com/help/idea/http-client-in-product-code-editor.html#redirect-output-to-a-custom-file-or-directory
 pub enum SaveResponse {
     // save the response into a new file if there exists already an existing save (use incremental
@@ -631,7 +631,7 @@ impl Default for Request {
 
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub enum CommentKind {
     // //
     DoubleSlash,
@@ -665,7 +665,7 @@ impl std::str::FromStr for CommentKind {
 
 #[derive(PartialEq, Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub struct Comment {
     pub value: String,
     pub kind: CommentKind,
@@ -683,7 +683,7 @@ impl ToString for Comment {
 
 #[derive(PartialEq, Debug, Clone, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 pub struct HttpVersion {
     pub major: u32,
     pub minor: u32,

@@ -1,5 +1,5 @@
-#[cfg(feature = "rspc")]
-use rspc::Type;
+#[cfg(feature = "specta")]
+use specta::Type;
 
 use std::path::PathBuf;
 
@@ -9,10 +9,9 @@ use thiserror::Error;
 use crate::model::PartialRequest;
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
-#[cfg_attr(feature = "rspc", derive(Type))]
+#[cfg_attr(feature = "specta", derive(Type))]
 #[derive(Error, Debug, PartialEq, Eq, Clone)]
 pub enum ParseError {
-
     #[error("Could not read the file: '{0}'.")]
     CouldNotReadRequestFile(PathBuf),
 

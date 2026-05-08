@@ -23,7 +23,7 @@ pub struct Parser {}
 type ParseResult<T> = Result<(T, Vec<ParseErrorDetails>), ParseErrorDetails>;
 
 impl Parser {
-    pub const REST_FILE_EXTENSIONS: [&str; 2] = ["http", "rest"];
+    pub const REST_FILE_EXTENSIONS: [&'static str; 2] = ["http", "rest"];
 
     #[allow(dead_code)]
     pub fn has_valid_extension<T: AsRef<std::path::Path>>(path: &T) -> bool {
